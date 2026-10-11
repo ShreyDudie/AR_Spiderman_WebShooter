@@ -7,7 +7,6 @@ export class SpiderHUD {
     this.smoothCrosshair = { x: window.innerWidth * 0.5, y: window.innerHeight * 0.5 };
   }
 
-  // Draw biometric hand joint skeleton with glowing joints and live pose tracking
   drawHandSkeleton(ctx, handStates, vision, now) {
     if (!handStates || handStates.length === 0) return;
 
@@ -30,7 +29,6 @@ export class SpiderHUD {
 
       ctx.save();
 
-      // 1. Draw glowing biometric bone lines
       ctx.lineWidth = isSpidey ? 2.4 : 1.5;
       ctx.strokeStyle = isSpidey ? 'rgba(213, 255, 133, 0.75)' : 'rgba(102, 246, 255, 0.4)';
       ctx.shadowColor = isSpidey ? '#d5ff85' : '#66f6ff';
@@ -46,7 +44,6 @@ export class SpiderHUD {
         ctx.stroke();
       }
 
-      // 2. Draw biometric joint nodes at all 21 landmarks
       for (let i = 0; i < 21; i++) {
         const pt = screenPts[i];
         if (!pt) continue;
@@ -73,7 +70,6 @@ export class SpiderHUD {
         ctx.fill();
       }
 
-      // 3. Biometric Suit Readout Badge
       const wristPt = screenPts[0];
       if (wristPt) {
         ctx.shadowBlur = 0;
@@ -90,23 +86,18 @@ export class SpiderHUD {
     }
   }
 
-  // Draw tactical Spider-Man aiming crosshair with magnetic target lock
   drawCrosshairs(ctx, handStates, vision, lockedTarget, candidateTarget, now) {
     const screenCenter = { x: vision.screenWidth * 0.5, y: vision.screenHeight * 0.5 };
 
-    // Determine target aim position
     let targetAimX = screenCenter.x;
     let targetAimY = screenCenter.y;
-    let isHandAiming = false;
     let isShootingPose = false;
 
     const primaryHand = handStates?.[0];
     if (primaryHand) {
-      isHandAiming = true;
       isShootingPose = primaryHand.isSpideyPose;
       const screenAim = vision.pointToScreen(primaryHand.aimTarget);
 
-      // Magnetic snapping: If locked onto candidate, gently snap reticle toward target center
       if (candidateTarget) {
         targetAimX = candidateTarget.center.x;
         targetAimY = candidateTarget.center.y;
@@ -119,7 +110,6 @@ export class SpiderHUD {
       targetAimY = candidateTarget.center.y;
     }
 
-    // Smooth crosshair interpolation
     this.smoothCrosshair.x += (targetAimX - this.smoothCrosshair.x) * 0.32;
     this.smoothCrosshair.y += (targetAimY - this.smoothCrosshair.y) * 0.32;
 
@@ -132,7 +122,6 @@ export class SpiderHUD {
     ctx.save();
     ctx.translate(cx, cy);
 
-    // Color theme
     const themeColor = isLocked
       ? '#66f6ff'
       : isCandidate
@@ -141,7 +130,6 @@ export class SpiderHUD {
       ? '#ffffff'
       : 'rgba(102, 246, 255, 0.75)';
 
-    // 1. Center Reticle Ring
     const radius = isShootingPose ? 18 : isCandidate ? 22 : 14;
     ctx.strokeStyle = themeColor;
     ctx.lineWidth = isCandidate || isShootingPose ? 2.5 : 1.6;
@@ -152,13 +140,11 @@ export class SpiderHUD {
     ctx.arc(0, 0, radius, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Center laser dot
     ctx.fillStyle = themeColor;
     ctx.beginPath();
     ctx.arc(0, 0, isShootingPose ? 3.5 : 2.5, 0, Math.PI * 2);
     ctx.fill();
 
-    // 2. Rotating Tick Marks (Tactical HUD)
     const rot = now * 0.002 * (isShootingPose ? 2.5 : 1.0);
     ctx.lineWidth = 2.0;
     for (let i = 0; i < 4; i++) {
@@ -171,7 +157,6 @@ export class SpiderHUD {
       ctx.stroke();
     }
 
-    // 3. Spider-Sense Warning Arcs (Pulsing around reticle when target locked)
     if (isCandidate || isLocked) {
       ctx.strokeStyle = '#d5ff85';
       ctx.lineWidth = 2.8;
@@ -181,17 +166,14 @@ export class SpiderHUD {
       const pulse = Math.sin(now * 0.016) * 5;
       const arcR = radius + 15 + pulse;
 
-      // Top arc
       ctx.beginPath();
       ctx.arc(0, 0, arcR, -Math.PI * 0.72, -Math.PI * 0.28);
       ctx.stroke();
 
-      // Bottom arc
       ctx.beginPath();
       ctx.arc(0, 0, arcR, Math.PI * 0.28, Math.PI * 0.72);
       ctx.stroke();
 
-      // Locked Target HUD Box Tooltip
       if (candidateTarget) {
         ctx.shadowBlur = 0;
         const text = `TARGET LOCKED // ${candidateTarget.detection.class.toUpperCase()}`;
@@ -211,7 +193,6 @@ export class SpiderHUD {
 
     ctx.restore();
 
-    // 4. Draw Laser Aim Trace Ray from hand muzzle to crosshair
     if (primaryHand && !isLocked) {
       const muzzle = vision.pointToScreen(primaryHand.shooterMuzzle);
       ctx.save();
@@ -226,7 +207,6 @@ export class SpiderHUD {
     }
   }
 
-  // Draw bounding boxes for detected small objects
   drawDetections(ctx, detections, vision, lockedTargetId, candidateTarget) {
     for (const det of detections) {
       if (lockedTargetId && det.id === lockedTargetId) continue;
@@ -246,7 +226,6 @@ export class SpiderHUD {
       ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
       ctx.setLineDash([]);
 
-      // Tactical corner brackets
       const c = Math.min(14, rect.w * 0.22, rect.h * 0.22);
       ctx.lineWidth = isAimCandidate ? 3.5 : 2.5;
       [
@@ -262,7 +241,6 @@ export class SpiderHUD {
         ctx.stroke();
       });
 
-      // Label badge
       ctx.shadowBlur = 0;
       const label = `${det.class.toUpperCase()} ${isAimCandidate ? '· READY' : ''}`;
       ctx.font = '700 10px Inter, sans-serif';

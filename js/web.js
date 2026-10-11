@@ -1,18 +1,16 @@
 // Hyper-Realistic Spider-Man Web Physics, Braided Silk Graphics, and Shooter FX
-// Photorealistic multi-strand braided webbing, catenary curves, harmonic tension, and impact decals
 
 export class WebSystem {
   constructor() {
-    this.projectiles = []; // In-flight web shots: { id, start, end, progress, duration, startTime, onImpact }
-    this.impactSplats = []; // Geometric spider-web decals: { x, y, radius, spokes, born, life }
-    this.sparks = []; // Luminous silk particles and energy sparks
-    this.muzzleFlashes = []; // Web-shooter muzzle flash bursts
+    this.projectiles = [];
+    this.impactSplats = [];
+    this.sparks = [];
+    this.muzzleFlashes = [];
   }
 
-  // Fire high-speed web shot from wrist muzzle
   shootProjectile({ start, end, handId, onImpact }) {
     const dist = Math.hypot(end.x - start.x, end.y - start.y);
-    const speed = Math.max(4200, dist * 9.0); // Fast, snappy Spidey shot (90-130ms)
+    const speed = Math.max(4200, dist * 9.0);
     const duration = Math.max(0.08, Math.min(0.15, dist / speed));
 
     const projectile = {
@@ -28,26 +26,17 @@ export class WebSystem {
     };
 
     this.projectiles.push(projectile);
-
-    // Spawn wrist muzzle flash
-    this.muzzleFlashes.push({
-      x: start.x,
-      y: start.y,
-      born: performance.now(),
-      life: 140,
-    });
+    this.muzzleFlashes.push({ x: start.x, y: start.y, born: performance.now(), life: 140 });
 
     return projectile;
   }
 
-  // Authentic geometric spider-web splat decal adhering to target
   addImpactSplat(point, radius = 32) {
     const spokesCount = 10;
     const angles = [];
     for (let i = 0; i < spokesCount; i++) {
       const base = (i / spokesCount) * Math.PI * 2;
-      const jitter = (Math.random() - 0.5) * 0.18;
-      angles.push(base + jitter);
+      angles.push(base + (Math.random() - 0.5) * 0.18);
     }
     this.impactSplats.push({
       x: point.x,
@@ -59,7 +48,6 @@ export class WebSystem {
       life: 6000,
     });
 
-    // Spawn impact particles
     for (let i = 0; i < 16; i++) {
       const ang = Math.random() * Math.PI * 2;
       const spd = 30 + Math.random() * 110;
@@ -95,7 +83,6 @@ export class WebSystem {
   }
 
   update(now) {
-    // 1. Update In-Flight Projectiles
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
       const p = this.projectiles[i];
       const elapsed = (now - p.startTime) / 1000;
@@ -112,13 +99,9 @@ export class WebSystem {
       }
     }
 
-    // 2. Clean old splats
     this.impactSplats = this.impactSplats.filter((s) => now - s.born < s.life);
-
-    // 3. Clean muzzle flashes
     this.muzzleFlashes = this.muzzleFlashes.filter((m) => now - m.born < m.life);
 
-    // 4. Update sparks
     const dt = 1 / 60;
     this.sparks = this.sparks.filter((s) => {
       s.x += s.vx * dt;
@@ -127,14 +110,12 @@ export class WebSystem {
     });
   }
 
-  // Draw wrist web-shooter gauntlet overlay at tracked wrist
   drawWristShooter(ctx, muzzlePoint, isReady, now) {
     ctx.save();
     ctx.translate(muzzlePoint.x, muzzlePoint.y);
 
     const pulse = Math.sin(now * 0.012) * 0.5 + 0.5;
 
-    // Outer gauntlet ring
     ctx.strokeStyle = isReady ? 'rgba(255, 51, 85, 0.85)' : 'rgba(102, 246, 255, 0.65)';
     ctx.lineWidth = 2.0;
     ctx.shadowColor = isReady ? '#ff3355' : '#66f6ff';
@@ -143,7 +124,6 @@ export class WebSystem {
     ctx.arc(0, 0, 11, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Red LED center nozzle emitter
     ctx.fillStyle = isReady ? '#ff3355' : 'rgba(255, 51, 85, 0.5)';
     ctx.shadowColor = '#ff3355';
     ctx.shadowBlur = 10 + pulse * 6;
@@ -151,7 +131,6 @@ export class WebSystem {
     ctx.arc(0, 0, 4, 0, Math.PI * 2);
     ctx.fill();
 
-    // High-tech micro tick notches
     ctx.lineWidth = 1.4;
     ctx.strokeStyle = '#ffffff';
     for (let i = 0; i < 4; i++) {
@@ -165,7 +144,6 @@ export class WebSystem {
     ctx.restore();
   }
 
-  // Render in-flight high-speed web projectiles
   drawProjectiles(ctx, now) {
     for (const p of this.projectiles) {
       const { start, current, end } = p;
@@ -178,7 +156,6 @@ export class WebSystem {
       ctx.save();
       ctx.lineCap = 'round';
 
-      // 1. Core high-velocity silk beam
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 3.5;
       ctx.shadowColor = '#66f6ff';
@@ -193,13 +170,11 @@ export class WebSystem {
       }
       ctx.stroke();
 
-      // 2. Cyan energy glow envelope
       ctx.strokeStyle = 'rgba(102, 246, 255, 0.7)';
       ctx.lineWidth = 6.5;
       ctx.shadowBlur = 24;
       ctx.stroke();
 
-      // 3. Spiraling braided silk whiskers
       for (let w = -1; w <= 1; w += 2) {
         ctx.beginPath();
         for (let s = 0; s <= segments; s++) {
@@ -215,7 +190,6 @@ export class WebSystem {
         ctx.stroke();
       }
 
-      // 4. Projectile web slug head
       ctx.fillStyle = '#ffffff';
       ctx.shadowColor = '#ffffff';
       ctx.shadowBlur = 20;
@@ -223,22 +197,10 @@ export class WebSystem {
       ctx.arc(current.x, current.y, 6.5, 0, Math.PI * 2);
       ctx.fill();
 
-      // Barbed silk claws on projectile head
-      ctx.strokeStyle = '#d5ff85';
-      ctx.lineWidth = 2.0;
-      for (let c = 0; c < 5; c++) {
-        const ang = (c / 5) * Math.PI * 2 + now * 0.05;
-        ctx.beginPath();
-        ctx.moveTo(current.x, current.y);
-        ctx.lineTo(current.x + Math.cos(ang) * 11, current.y + Math.sin(ang) * 11);
-        ctx.stroke();
-      }
-
       ctx.restore();
     }
   }
 
-  // Render attached braided web tether with realistic physical elasticity
   drawTether(ctx, start, end, tension = 0, now = performance.now()) {
     if (!start || !end || isNaN(start.x) || isNaN(start.y) || isNaN(end.x) || isNaN(end.y)) return;
     const dx = end.x - start.x;
@@ -247,14 +209,11 @@ export class WebSystem {
     const px = -dy / dist;
     const py = dx / dist;
 
-    // Gravity catenary sag when loose; straightens taut when pulled
     const sag = (1 - tension) * Math.min(50, dist * 0.12);
-    // Harmonic vibration amplitude increases with pull tension
     const vibrationAmp = tension > 0.04
       ? (Math.sin(now * 0.09) * 3.5 + Math.cos(now * 0.15) * 2.2) * tension
       : 0;
 
-    // Emit sparks on high tension
     if (tension > 0.35 && Math.random() < 0.45) {
       this.spawnSparksAlongLine(start, end, 1);
     }
@@ -263,8 +222,6 @@ export class WebSystem {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // 4 Layered Braided Silk Strands:
-    // Core white tensile cable + dual wrapping helical fibers + outer glow
     const strands = [
       { offset: 0, color: '#ffffff', width: 2.8 + tension * 1.2, blur: 16, glow: '#ffffff' },
       { offset: 1, color: 'rgba(102, 246, 255, 0.9)', width: 1.8, blur: 12, glow: '#66f6ff' },
@@ -278,7 +235,7 @@ export class WebSystem {
       ctx.beginPath();
       for (let i = 0; i <= segments; i++) {
         const t = i / segments;
-        const envelope = Math.sin(t * Math.PI); // Pinched at wrist and target
+        const envelope = Math.sin(t * Math.PI);
 
         const gravitySag = envelope * sag;
         const helix = Math.sin(t * 36 + now * 0.025 + strand.offset * 2.0) * 4.0 * envelope * (1 - tension * 0.6);
@@ -298,7 +255,6 @@ export class WebSystem {
       ctx.stroke();
     }
 
-    // Anchor attachment ring at target
     ctx.beginPath();
     ctx.arc(end.x, end.y, 7 + tension * 5, 0, Math.PI * 2);
     ctx.strokeStyle = '#ffffff';
@@ -307,7 +263,6 @@ export class WebSystem {
     ctx.shadowBlur = 16;
     ctx.stroke();
 
-    // Muzzle anchor ring at wrist
     ctx.beginPath();
     ctx.arc(start.x, start.y, 6, 0, Math.PI * 2);
     ctx.fillStyle = '#ffffff';
@@ -316,7 +271,6 @@ export class WebSystem {
     ctx.restore();
   }
 
-  // Draw intricate spider-web splat decals adhering to objects
   drawSplats(ctx, now) {
     for (const splat of this.impactSplats) {
       const age = now - splat.born;
@@ -329,7 +283,6 @@ export class WebSystem {
       ctx.shadowBlur = 10;
       ctx.lineWidth = 1.6;
 
-      // Radial spokes
       for (const ang of splat.angles) {
         ctx.beginPath();
         ctx.moveTo(splat.x, splat.y);
@@ -337,7 +290,6 @@ export class WebSystem {
         ctx.stroke();
       }
 
-      // Concentric web polygons
       for (let r = 1; r <= splat.rings; r++) {
         const ringRad = (r / splat.rings) * splat.radius;
         ctx.beginPath();
@@ -356,7 +308,6 @@ export class WebSystem {
     }
   }
 
-  // Draw muzzle flash bursts
   drawMuzzleFlashes(ctx, now) {
     for (const m of this.muzzleFlashes) {
       const age = now - m.born;
@@ -383,7 +334,6 @@ export class WebSystem {
     }
   }
 
-  // Draw dynamic sparks
   drawSparks(ctx, now) {
     if (this.sparks.length === 0) return;
     ctx.save();

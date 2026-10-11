@@ -1,8 +1,6 @@
 // Camera Stream & MediaPipe Vision Pipeline
-// Filters strictly for small graspable real-world objects (no humans/massive furniture)
-// Supports rear/front camera switching, mirroring, coordinate projection, and AR snapshots
+// Filters strictly for small graspable real-world objects and extracts exact contours
 
-// Whitelist strictly of small, graspable real-world objects
 const ALLOWED_SMALL_OBJECTS = new Set([
   'bottle', 'cup', 'wine glass', 'mug', 'bowl',
   'cell phone', 'mouse', 'remote', 'keyboard', 'book',
@@ -19,8 +17,8 @@ export class VisionPipeline {
     this.canvas = canvasElement;
     this.ctx = canvasElement.getContext('2d');
     this.stream = null;
-    this.facingMode = 'environment'; // 'environment' (rear) or 'user' (selfie)
-    this.isMirrored = false; // front is mirrored, rear is unmirrored
+    this.facingMode = 'environment';
+    this.isMirrored = false;
 
     this.handLandmarker = null;
     this.objectDetector = null;
@@ -98,10 +96,6 @@ export class VisionPipeline {
       this.stream = null;
     }
 
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new Error('Camera access not supported on this device/browser. Use HTTPS or localhost.');
-    }
-
     const constraints = {
       audio: false,
       video: {
@@ -123,21 +117,6 @@ export class VisionPipeline {
 
     this.video.srcObject = this.stream;
     await this.video.play();
-
-    if (!this.video.videoWidth || !this.video.videoHeight) {
-      await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('Camera video stream timeout')), 7000);
-        this.video.addEventListener(
-          'loadedmetadata',
-          () => {
-            clearTimeout(timeout);
-            resolve();
-          },
-          { once: true }
-        );
-      });
-    }
-
     this.resizeCanvas();
   }
 
@@ -174,12 +153,7 @@ export class VisionPipeline {
     const cropX = (renderW - this.screenWidth) * 0.5;
     const cropY = (renderH - this.screenHeight) * 0.5;
 
-    let sx;
-    if (this.isMirrored) {
-      sx = (1 - normPoint.x) * renderW - cropX;
-    } else {
-      sx = normPoint.x * renderW - cropX;
-    }
+    let sx = this.isMirrored ? (1 - normPoint.x) * renderW - cropX : normPoint.x * renderW - cropX;
     const sy = normPoint.y * renderH - cropY;
 
     return { x: sx, y: sy };
@@ -193,21 +167,14 @@ export class VisionPipeline {
     const vw = this.video.videoWidth;
     const vh = this.video.videoHeight;
     const scale = Math.max(this.screenWidth / vw, this.screenHeight / vh);
-    const renderW = vw * scale;
-    const cropX = (renderW - this.screenWidth) * 0.5;
+    const cropX = (vw * scale - this.screenWidth) * 0.5;
     const cropY = (vh * scale - this.screenHeight) * 0.5;
 
     const [bx, by, bw, bh] = box;
     const sw = bw * scale;
     const sh = bh * scale;
     const sy = by * scale - cropY;
-
-    let sx;
-    if (this.isMirrored) {
-      sx = this.screenWidth - (bx * scale - cropX) - sw;
-    } else {
-      sx = bx * scale - cropX;
-    }
+    let sx = this.isMirrored ? this.screenWidth - (bx * scale - cropX) - sw : bx * scale - cropX;
 
     return { x: sx, y: sy, w: sw, h: sh };
   }
@@ -220,16 +187,10 @@ export class VisionPipeline {
     const vw = this.video.videoWidth;
     const vh = this.video.videoHeight;
     const scale = Math.max(this.screenWidth / vw, this.screenHeight / vh);
-    const renderW = vw * scale;
-    const cropX = (renderW - this.screenWidth) * 0.5;
+    const cropX = (vw * scale - this.screenWidth) * 0.5;
     const cropY = (vh * scale - this.screenHeight) * 0.5;
 
-    let bx;
-    if (this.isMirrored) {
-      bx = (this.screenWidth - rect.x - cropX - rect.w) / scale;
-    } else {
-      bx = (rect.x + cropX) / scale;
-    }
+    let bx = this.isMirrored ? (this.screenWidth - rect.x - cropX - rect.w) / scale : (rect.x + cropX) / scale;
     const by = (rect.y + cropY) / scale;
     const bw = rect.w / scale;
     const bh = rect.h / scale;
@@ -237,6 +198,7 @@ export class VisionPipeline {
     return [bx, by, bw, bh];
   }
 
+  // Extract pure contour silhouette of the real object without rectangular background box
   captureObjectSnapshot(screenBox) {
     if (!this.video || this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return null;
     try {
@@ -276,12 +238,11 @@ export class VisionPipeline {
       sctx.drawImage(this.video, srcX, srcY, srcW, srcH, 0, 0, w, h);
       sctx.restore();
 
-      // Extract actual contoured silhouette dimensions (remove rectangular background)
+      // Contour edge mask extraction
       try {
         const imgData = sctx.getImageData(0, 0, w, h);
         const data = imgData.data;
 
-        // Sample background color along 4 perimeter borders
         let bgR = 0, bgG = 0, bgB = 0, bgCount = 0;
         for (let x = 0; x < w; x++) {
           const topIdx = x * 4;
@@ -308,7 +269,6 @@ export class VisionPipeline {
         const rx = w * 0.5;
         const ry = h * 0.5;
 
-        // Mask out background pixels, leaving only the actual object
         for (let y = 0; y < h; y++) {
           const dy = (y - cy) / ry;
           for (let x = 0; x < w; x++) {
@@ -326,13 +286,11 @@ export class VisionPipeline {
               (b - bgB) * (b - bgB)
             );
 
-            // If outside object boundary or matching background, make transparent
             if (normDist > 1.0) {
               data[idx + 3] = 0;
             } else if (normDist > 0.82 && colorDiff < 42) {
               data[idx + 3] = 0;
             } else if (normDist > 0.8) {
-              // Smooth feathered edge
               const edgeAlpha = Math.max(0, Math.min(1, (1.0 - normDist) / 0.2));
               data[idx + 3] = Math.round(data[idx + 3] * edgeAlpha);
             }
@@ -341,7 +299,6 @@ export class VisionPipeline {
 
         sctx.putImageData(imgData, 0, 0);
       } catch (segErr) {
-        // Fallback to clipped oval mask if getImageData restricted
         sctx.globalCompositeOperation = 'destination-in';
         sctx.beginPath();
         sctx.ellipse(w * 0.5, h * 0.5, w * 0.48, h * 0.48, 0, 0, Math.PI * 2);
@@ -369,7 +326,6 @@ export class VisionPipeline {
     try {
       return this.handLandmarker.detectForVideo(this.video, now);
     } catch (e) {
-      console.error('Hand landmark error:', e);
       return null;
     }
   }
@@ -378,7 +334,7 @@ export class VisionPipeline {
     if (!this.objectDetector || !this.video || this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
       return this.trackedDetections;
     }
-    if (this.isObjectDetectBusy || now - this.lastObjectDetectTime < 380) {
+    if (this.isObjectDetectBusy || now - this.lastObjectDetectTime < 320) {
       return this.trackedDetections;
     }
 
@@ -403,43 +359,33 @@ export class VisionPipeline {
           };
         })
         .filter((d) => {
-          // 1. Minimum confidence score
           if (d.score < 0.28) return false;
-
-          // 2. Filter out humans, entire bodies, large furniture, and vehicles
           if (
-            d.class === 'person' ||
-            d.class === 'human' ||
-            d.class === 'traffic light' ||
-            d.class === 'bench' ||
-            d.class === 'chair' ||
-            d.class === 'couch' ||
-            d.class === 'bed' ||
-            d.class === 'bus' ||
-            d.class === 'train' ||
-            d.class === 'truck' ||
-            d.class === 'refrigerator'
-          ) {
-            return false;
-          }
+            d.class === 'person' || d.class === 'human' || d.class === 'chair' ||
+            d.class === 'couch' || d.class === 'bed' || d.class === 'refrigerator'
+          ) return false;
 
-          // 3. Only accept small/graspable objects whitelist
-          const isAllowed = ALLOWED_SMALL_OBJECTS.has(d.class);
-          if (!isAllowed) return false;
+          if (!ALLOWED_SMALL_OBJECTS.has(d.class)) return false;
 
-          // 4. Maximum size guard: small objects should not occupy more than 28% of the entire screen
           const rect = this.boxToScreen(d.bbox);
           const area = rect.w * rect.h;
-          if (area > screenTotalArea * 0.28 || rect.h > this.screenHeight * 0.65) {
-            return false;
-          }
+          if (area > screenTotalArea * 0.28 || rect.h > this.screenHeight * 0.65) return false;
 
           return true;
         });
 
-      this.trackedDetections = [...raw, ...this.manualTargets];
+      // Exponential smoothing for detection bounding boxes across frames
+      this.trackedDetections = raw.map((newDet) => {
+        const prev = this.trackedDetections.find((p) => p.class === newDet.class);
+        if (!prev) return newDet;
+
+        const smoothBox = newDet.bbox.map((val, idx) => prev.bbox[idx] + (val - prev.bbox[idx]) * 0.4);
+        return { ...newDet, bbox: smoothBox };
+      });
+
+      this.trackedDetections = [...this.trackedDetections, ...this.manualTargets];
     } catch (err) {
-      console.warn('Object detection frame error:', err);
+      console.warn('Object detection error:', err);
     } finally {
       this.isObjectDetectBusy = false;
     }
@@ -458,10 +404,7 @@ export class VisionPipeline {
     };
     this.manualTargets.unshift(manual);
     if (this.manualTargets.length > 6) this.manualTargets.pop();
-    this.trackedDetections = [
-      ...this.trackedDetections.filter((d) => !d.manual),
-      ...this.manualTargets,
-    ];
+    this.trackedDetections = [...this.trackedDetections.filter((d) => !d.manual), ...this.manualTargets];
     return manual;
   }
 

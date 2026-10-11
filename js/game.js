@@ -1,5 +1,4 @@
 // Master Spider-Man AR Game Engine
-// Features: Wrist down to shoot, Wrist back to pull, Auto Target Lock, Pure AR Object Cutout Reeling
 
 import { sound } from './audio.js';
 import { GestureAnalyzer } from './gestures.js';
@@ -37,7 +36,7 @@ export class SpideyGame {
     this.updateStatus('STARTING CAMERA…', 'idle');
     sound.init();
 
-    await this.vision.startCamera('environment'); // Rear camera for mobile AR
+    await this.vision.startCamera('environment');
     this.updateStatus('LOADING VISION AI MODELS…', 'idle');
 
     await this.vision.initModels((msg) => {
@@ -48,7 +47,7 @@ export class SpideyGame {
     this.running = true;
     this.updateStatus('SCANNING SMALL OBJECTS', 'ready');
     if (this.ui.gate) this.ui.gate.classList.add('hidden');
-    this.showToast('Spider-Sense active! Flick wrist DOWN or tap THWIP to shoot web!');
+    this.showToast('Spider-Sense active! Make Spidey pose or tap THWIP to shoot web!');
 
     window.addEventListener('resize', () => this.vision.resizeCanvas());
     this.setupInteractions();
@@ -79,7 +78,6 @@ export class SpideyGame {
     this.hud.triggerFlash();
   }
 
-  // Get the best locked target on screen (closest to screen center or hand aim)
   getBestTarget(aimPoint) {
     const detections = this.vision.trackedDetections;
     if (!detections || detections.length === 0) return null;
@@ -137,7 +135,6 @@ export class SpideyGame {
             latched.originalCenter
           );
 
-          // Blend with touch pull if active
           if (this.touchPullAmount > 0) {
             pull.pullAmount = Math.max(pull.pullAmount, this.touchPullAmount);
             pull.tension = Math.max(pull.tension, this.touchPullAmount * 1.2);
@@ -146,7 +143,6 @@ export class SpideyGame {
         }
       }
     } else {
-      // If hand leaves camera view while tethered without touch pull, release web immediately!
       if (this.arObjects.latchedTarget && this.touchPullAmount === 0) {
         this.releaseWeb('Wrist released');
         return;
@@ -155,7 +151,6 @@ export class SpideyGame {
 
     this.vision.pullDataMap = pullMap;
 
-    // Check Open Palm gesture to release web
     for (const hand of this.handStates) {
       if (hand.isOpenPalm && this.arObjects.latchedTarget) {
         this.releaseWeb('Wrist released');
@@ -163,7 +158,6 @@ export class SpideyGame {
       }
     }
 
-    // Determine target candidate
     const primaryHand = this.handStates[0];
     const screenAim = primaryHand
       ? this.vision.pointToScreen(primaryHand.aimTarget)
@@ -179,7 +173,6 @@ export class SpideyGame {
       this.lockedTarget = null;
     }
 
-    // Update UI readout
     const latched = this.arObjects.latchedTarget;
     if (latched) {
       if (this.ui.handState) this.ui.handState.textContent = 'WEB TETHER LIVE';
@@ -192,7 +185,7 @@ export class SpideyGame {
         if (this.ui.handState) this.ui.handState.textContent = 'SPIDEY POSE READY ✓';
         if (this.ui.handDetail) {
           this.ui.handDetail.textContent = this.lockedTarget
-            ? `LOCKED: ${this.lockedTarget.detection.class.toUpperCase()} · WEB FIRED!`
+            ? `LOCKED: ${this.lockedTarget.detection.class.toUpperCase()} · FIRING!`
             : 'AIM AT TARGET OBJECT';
         }
         if (this.ui.gestureMeter) this.ui.gestureMeter.style.width = '100%';
@@ -208,12 +201,12 @@ export class SpideyGame {
         if (this.ui.gestureMeter) this.ui.gestureMeter.style.width = '45%';
       }
 
-      // Check Shooting Trigger: Shoot ONLY on verified Spidey Pose (no random firing!)
+      // Verified single-shot trigger on confirmed pose (no continuous auto-fire glitch!)
       const shouldShoot =
         primaryHand.isSpideyPose &&
         this.lockedTarget &&
         !this.arObjects.latchedTarget &&
-        now - this.lastShootTime > 700;
+        now - this.lastShootTime > 750;
 
       if (shouldShoot) {
         this.lastShootTime = now;
@@ -226,7 +219,6 @@ export class SpideyGame {
     }
   }
 
-  // Shoot web action (triggered by gesture, button, or tap)
   triggerShootAction() {
     if (this.arObjects.latchedTarget) {
       this.releaseWeb('Web released');
@@ -265,7 +257,6 @@ export class SpideyGame {
         this.activeProjectiles.delete(handId);
         sound.playImpact();
 
-        // Safely extract pure AR cutout texture snapshot
         let snapshot = null;
         try {
           snapshot = this.vision.captureObjectSnapshot(target.rect);
@@ -273,7 +264,6 @@ export class SpideyGame {
           console.warn('Snapshot capture error:', err);
         }
 
-        // Attach tether
         const attached = this.arObjects.attachWeb({
           detection: target.detection,
           screenBox: target.rect,
@@ -357,7 +347,7 @@ export class SpideyGame {
 
     const latched = this.arObjects.latchedTarget;
 
-    // 1. Draw detected small objects
+    // 1. Draw target detections (only on camera view before latching)
     this.hud.drawDetections(
       this.ctx,
       this.vision.trackedDetections,
@@ -366,7 +356,7 @@ export class SpideyGame {
       this.lockedTarget
     );
 
-    // 2. Draw latched pure AR object cutout
+    // 2. Draw latched object contour shape without bounding boxes
     if (latched) {
       this.arObjects.draw(this.ctx, now);
 
@@ -379,18 +369,18 @@ export class SpideyGame {
       }
     }
 
-    // 3. Draw biometric hand skeleton scanner & wrist web-shooter
+    // 3. Draw wrist web-shooter & biometric skeleton
     this.hud.drawHandSkeleton(this.ctx, this.handStates, this.vision, now);
     for (const hand of this.handStates) {
       const screenMuzzle = this.vision.pointToScreen(hand.shooterMuzzle);
       this.web.drawWristShooter(this.ctx, screenMuzzle, hand.isSpideyPose, now);
     }
 
-    // 4. Update and render web projectiles, splats, sparks
+    // 4. Update and render web projectiles & impact visual effects
     this.web.update(now);
     this.web.render(this.ctx, now);
 
-    // 5. Draw HUD crosshairs & lock-on reticle
+    // 5. Draw HUD reticles and aiming crosshairs
     this.hud.drawCrosshairs(
       this.ctx,
       this.handStates,
@@ -400,7 +390,7 @@ export class SpideyGame {
       now
     );
 
-    // 6. Draw manual drag box if dragging
+    // 6. Draw manual drag selection if active
     if (this.touchDrag && !this.touchDrag.isClick) {
       const { start, cur } = this.touchDrag;
       this.ctx.save();
@@ -411,7 +401,7 @@ export class SpideyGame {
       this.ctx.restore();
     }
 
-    // 7. Draw screen bursts & flash
+    // 7. Visual FX bursts & screen flashes
     this.hud.drawBursts(this.ctx, now);
     this.hud.drawScreenFlash(this.ctx, w, h);
   }
@@ -452,7 +442,6 @@ export class SpideyGame {
         this.touchDrag.isClick = false;
       }
 
-      // If latched, dragging down on screen pulls the object!
       if (this.arObjects.latchedTarget) {
         const pullDy = e.clientY - this.touchDrag.start.y;
         this.touchPullAmount = Math.max(0, Math.min(1.0, pullDy / 130));
@@ -464,10 +453,8 @@ export class SpideyGame {
       if (!drag || drag.pointerId !== e.pointerId) return;
 
       if (drag.isClick) {
-        // Tapped screen: shoot at locked target or release!
         this.triggerShootAction();
       } else if (!this.arObjects.latchedTarget) {
-        // Dragged a custom target box
         const x = Math.min(drag.start.x, drag.cur.x);
         const y = Math.min(drag.start.y, drag.cur.y);
         const w = Math.abs(drag.cur.x - drag.start.x);
@@ -475,7 +462,7 @@ export class SpideyGame {
 
         if (w >= 28 && h >= 28) {
           this.vision.addManualTarget({ x, y, w, h });
-          this.showToast('Custom target locked! Flick wrist DOWN or tap THWIP!');
+          this.showToast('Custom target locked! Make Spidey pose or tap THWIP!');
         }
       }
 
@@ -496,7 +483,6 @@ export class SpideyGame {
       this.updateStatus('SCANNING SMALL OBJECTS', 'ready');
       return mode;
     } catch (e) {
-      console.error('Camera switch error:', e);
       this.showToast('Could not switch camera');
       this.updateStatus('SCANNING SMALL OBJECTS', 'ready');
       return null;
