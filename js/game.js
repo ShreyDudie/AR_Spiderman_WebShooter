@@ -240,7 +240,7 @@ export class SpideyGame {
     if (phase === 'AIM') {
       const lead = aimHands.find((h) => h.isSpideyPose) || aimHands[0];
       // freeze the lock while the wrist is flicking so the shot can't slide to another object
-      if (lead.isSpideyPose && lead.flickSpeed < 1.0) {
+      if (lead.isSpideyPose && lead.flickProgress < 0.25 && lead.flickSpeed < 1.0) {
         const aim = this.vision.pointToScreen(lead.aimTarget);
         const target = this.getBestTarget(aim, 90);
         if (target && (!this.lockedTarget || this.lockedTarget.detection.id !== target.detection.id)) {
@@ -277,7 +277,7 @@ export class SpideyGame {
           need2
             ? `${t.detection.class.toUpperCase()} IS HEAVY — AIM WITH BOTH HANDS`
             : `${t.detection.class.toUpperCase()} · FLICK WRIST DOWN TO SHOOT`,
-          75
+          Math.round(20 + 80 * Math.max(...aimHands.map((h) => h.flickProgress || 0)))
         );
       } else {
         this.setHandText('2 · AIMING', 'MOVE CROSSHAIR ONTO AN OBJECT', 40);
