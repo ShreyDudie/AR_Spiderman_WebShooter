@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#070b13">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>SPIDEY AR // Real-Time Web Shooter</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="preconnect" href="https://storage.googleapis.com" crossorigin>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #eef8ff;
+      --muted: #8ea5bb;
+      --cyan: #66f6ff;
+      --lime: #d5ff85;
+      --spidey-red: #ff3355;
+      --panel: rgba(8, 16, 28, 0.78);
+      --panel-border: rgba(102, 246, 255, 0.25);
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      width: 100%; height: 100%; margin: 0; padding: 0;
+      overflow: hidden; background: #05080e; color: var(--ink);
+      font-family: var(--font); user-select: none; -webkit-user-select: none;
+      overscroll-behavior: none;
+    }
+    #camera-feed {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      object-fit: cover; z-index: 1; background: #05080e;
+      transition: transform 0.25s ease;
+    }
+    .camera-shade {
+      position: fixed; inset: 0; z-index: 2; pointer-events: none;
+      background: radial-gradient(circle at center, transparent 40%, rgba(2, 6, 12, 0.65) 100%),
+                  linear-gradient(180deg, rgba(3, 8, 16, 0.7) 0%, transparent 22%, transparent 72%, rgba(3, 8, 16, 0.75) 100%);
+    }
+    #vision-overlay {
+      position: fixed; inset: 0; z-index: 3; width: 100%; height: 100%;
+      pointer-events: auto; touch-action: none;
+    }
+    #app {
+      position: fixed; inset: 0; z-index: 5; pointer-events: none;
+      display: flex; flex-direction: column; justify-content: space-between;
+    }
+    .topbar {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      padding: max(16px, env(safe-area-inset-top)) 16px 0; pointer-events: auto;
+    }
+    .brand { display: flex; gap: 10px; align-items: center; }
+    .brand-mark {
+      display: grid; width: 38px; height: 38px; place-items: center;
+      border: 1.5px solid var(--spidey-red); border-radius: 12px;
+      background: rgba(255, 51, 85, 0.12); color: var(--spidey-red);
+      box-shadow: 0 0 20px rgba(255, 51, 85, 0.35); font-size: 20px; font-weight: 900;
+    }
+    .brand-copy strong { display: block; font-size: 13px; letter-spacing: 0.2em; font-weight: 800; }
+    .brand-copy span { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; letter-spacing: 0.15em; }
+
+    .status {
+      display: flex; gap: 8px; align-items: center; min-height: 36px;
+      padding: 0 13px; border: 1px solid var(--panel-border); border-radius: 99px;
+      background: var(--panel); color: #d8e8f4; font-size: 10px; letter-spacing: 0.1em;
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    }
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #687a8b; box-shadow: 0 0 10px currentColor;
+    }
+    .status[data-state="ready"] .status-dot { background: var(--lime); color: var(--lime); }
+    .status[data-state="tracking"] .status-dot { background: var(--cyan); color: var(--cyan); }
+    .status[data-state="error"] .status-dot { background: var(--spidey-red); color: var(--spidey-red); }
+
+    .readout {
+      position: absolute; top: max(72px, calc(env(safe-area-inset-top) + 60px)); left: 16px;
+      display: grid; gap: 8px; width: min(240px, calc(100vw - 32px)); pointer-events: auto;
+    }
+    .readout-card {
+      padding: 12px 14px; border: 1px solid var(--panel-border); border-radius: 14px;
+      background: var(--panel); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    }
+    .eyebrow { color: var(--cyan); font-size: 9px; font-weight: 800; letter-spacing: 0.18em; }
+    .readout-main {
+      display: flex; align-items: baseline; justify-content: space-between;
+      margin-top: 6px; font-size: 12px;
+    }
+    .readout-main span:last-child { color: var(--muted); font-size: 10px; }
+    .meter {
+      height: 4px; margin-top: 8px; overflow: hidden; border-radius: 4px;
+      background: rgba(255, 255, 255, 0.12);
+    }
+    .meter > i {
+      display: block; width: 0%; height: 100%; border-radius: inherit;
+      background: linear-gradient(90deg, var(--cyan), var(--lime));
+      transition: width 0.1s linear;
+    }
+
+    .bottom {
+      padding: 0 16px max(16px, env(safe-area-inset-bottom));
+      display: flex; align-items: flex-end; justify-content: space-between; gap: 12px;
+      pointer-events: auto;
+    }
+    .hint {
+      max-width: min(480px, 68vw); padding: 12px 14px; border: 1px solid var(--panel-border);
+      border-radius: 14px; background: var(--panel); color: #d0e0ed; font-size: 11px;
+      line-height: 1.45; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    }
+    .hint strong { color: #ffffff; display: block; margin-bottom: 3px; }
+    .hint small { display: block; color: var(--muted); font-size: 9.5px; }
+
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+    button {
+      min-height: 42px; padding: 0 13px; border: 1px solid var(--panel-border);
+      border-radius: 12px; background: rgba(10, 24, 38, 0.88); color: var(--ink);
+      font: inherit; font-size: 10px; font-weight: 750; letter-spacing: 0.1em;
+      cursor: pointer; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      transition: transform 0.1s ease, background 0.15s ease, border-color 0.15s ease;
+    }
+    button:active { transform: scale(0.96); }
+    button.primary {
+      border-color: rgba(213, 255, 133, 0.6);
+      background: linear-gradient(135deg, rgba(30, 92, 60, 0.9), rgba(15, 60, 75, 0.95));
+      box-shadow: 0 0 20px rgba(102, 246, 255, 0.2);
+    }
+    button:disabled { opacity: 0.5; cursor: wait; }
+
+    .shoot-btn {
+      position: fixed; right: 20px; bottom: max(96px, calc(env(safe-area-inset-bottom) + 90px));
+      width: 68px; height: 68px; border-radius: 50%;
+      border: 2px solid var(--spidey-red);
+      background: radial-gradient(circle at 35% 35%, #ff4d6d, #c9183b 70%, #800a20 100%);
+      color: #ffffff; font-size: 11px; font-weight: 900; letter-spacing: 0.08em;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+      box-shadow: 0 0 25px rgba(255, 51, 85, 0.55), 0 8px 24px rgba(0,0,0,0.5), inset 0 0 12px rgba(255,255,255,0.3);
+      cursor: pointer; z-index: 12; pointer-events: auto;
+      transition: transform 0.12s ease, box-shadow 0.15s ease;
+    }
+    .shoot-btn:active { transform: scale(0.9); box-shadow: 0 0 35px rgba(255, 51, 85, 0.85); }
+    .shoot-btn i { font-style: normal; font-size: 20px; line-height: 1; }
+
+    .toast {
+      position: absolute; top: 46%; left: 50%; padding: 11px 18px;
+      border: 1px solid rgba(102, 246, 255, 0.45); border-radius: 14px;
+      background: rgba(6, 16, 28, 0.92); color: #f2fcff; font-size: 11.5px;
+      font-weight: 600; letter-spacing: 0.04em; pointer-events: none;
+      opacity: 0; transform: translate(-50%, -20%) scale(0.95);
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5), 0 0 20px rgba(102, 246, 255, 0.2);
+      text-align: center; max-width: 85vw;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
+
+    .caught {
+      position: absolute; top: 40%; left: 50%; color: #ffffff;
+      font-size: clamp(20px, 6vw, 32px); font-weight: 900; letter-spacing: 0.25em;
+      opacity: 0; pointer-events: none; text-shadow: 0 0 25px var(--cyan), 0 0 50px var(--lime);
+      transform: translate(-50%, -50%) scale(0.6); text-align: center;
+      width: 100%;
+    }
+    .caught.show { animation: caughtAnim 1.1s cubic-bezier(0.1, 0.9, 0.2, 1) forwards; }
+    @keyframes caughtAnim {
+      0% { opacity: 0; transform: translate(-50%, -50%) scale(0.6); }
+      20% { opacity: 1; transform: translate(-50%, -50%) scale(1.15); }
+      70% { opacity: 1; transform: translate(-50%, -50%) scale(1.0); }
+      100% { opacity: 0; transform: translate(-50%, -90%) scale(0.9); }
+    }
+
+    .gate {
+      position: fixed; inset: 0; z-index: 20; display: grid; place-items: center;
+      padding: 20px; background: rgba(3, 7, 14, 0.88); backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px); pointer-events: auto;
+      transition: opacity 0.35s ease, visibility 0.35s ease;
+    }
+    .gate.hidden { visibility: hidden; opacity: 0; pointer-events: none; }
+    .gate-card {
+      width: min(440px, 100%); padding: 26px; border: 1px solid var(--panel-border);
+      border-radius: 24px; background: linear-gradient(150deg, rgba(14, 28, 44, 0.96), rgba(8, 14, 24, 0.98));
+      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.65), 0 0 50px rgba(102, 246, 255, 0.12);
+    }
+    .gate-card h1 {
+      margin: 10px 0 8px; font-size: clamp(26px, 7vw, 36px);
+      letter-spacing: 0.08em; font-weight: 900;
+      background: linear-gradient(90deg, #ffffff, var(--cyan));
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .gate-card p { color: #adc0d0; font-size: 13px; line-height: 1.6; margin-bottom: 14px; }
+    .pose-guide {
+      display: flex; gap: 12px; align-items: center; padding: 12px 14px;
+      margin: 14px 0; border: 1px solid rgba(213, 255, 133, 0.35); border-radius: 14px;
+      background: rgba(213, 255, 133, 0.07);
+    }
+    .pose-icon { font-size: 28px; line-height: 1; }
+    .pose-info strong { display: block; font-size: 11.5px; color: var(--lime); letter-spacing: 0.08em; }
+    .pose-info span { display: block; font-size: 10px; color: #bed2e4; margin-top: 2px; }
+
+    .startup-error { color: #ff8597 !important; font-size: 11.5px !important; margin-top: 8px; }
+    .gate-card .primary { width: 100%; min-height: 50px; margin-top: 10px; font-size: 11.5px; }
+
+    @media (max-width: 480px) {
+      .readout { top: max(68px, calc(env(safe-area-inset-top) + 54px)); }
+      .bottom { flex-direction: column; align-items: stretch; }
+      .hint { max-width: none; }
+      .controls { justify-content: space-between; }
+      .controls button { flex: 1; }
+    }
+  </style>
+</head>
+<body>
+  <video id="camera-feed" autoplay muted playsinline></video>
+  <div class="camera-shade"></div>
+  <canvas id="vision-overlay" aria-hidden="true"></canvas>
+
+  <main id="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">🕷</div>
+        <div class="brand-copy">
+          <strong>SPIDER-MAN AR</strong>
+          <span>REAL-TIME WEB SHOOTER</span>
+        </div>
+      </div>
+      <div id="status" class="status" data-state="idle">
+        <i class="status-dot"></i>
+        <span id="status-text">INITIALIZING</span>
+      </div>
+    </header>
+
+    <section class="readout">
+      <div class="readout-card">
+        <div class="eyebrow">SPIDER-SENSE / HANDS</div>
+        <div class="readout-main">
+          <strong id="hand-state">SEARCHING</strong>
+          <span id="hand-detail">SHOW HANDS TO CAMERA</span>
+        </div>
+        <div class="meter"><i id="gesture-meter"></i></div>
+      </div>
+      <div class="readout-card">
+        <div class="eyebrow">REAL OBJECT RADAR</div>
+        <div class="readout-main">
+          <strong id="object-state">LOADING</strong>
+          <span id="object-count">ON DEVICE</span>
+        </div>
+      </div>
+    </section>
+
+    <div id="toast" class="toast"></div>
+    <div id="caught" class="caught">TARGET REELED IN!</div>
+
+    <button id="shoot-btn" class="shoot-btn" aria-label="Shoot Web">
+      <i>🕸️</i>
+      <span>THWIP</span>
+    </button>
+
+    <footer class="bottom">
+      <div class="hint" id="hint">
+        <strong>🕸️ FLICK WRIST DOWN to shoot web · PULL WRIST BACK to reel in!</strong>
+        <small>Target auto-locks on any small object. Flick wrist down (or hold Spidey pose / tap screen) to shoot. Pull wrist back to haul the object in!</small>
+      </div>
+      <div class="controls">
+        <button id="cam-toggle">🔄 FLIP CAM</button>
+        <button id="recenter">🎯 RESCAN</button>
+        <button id="audio-toggle">🔊 AUDIO ON</button>
+      </div>
+    </footer>
+  </main>
+
+  <section id="gate" class="gate">
+    <div class="gate-card">
+      <div class="eyebrow">AUGMENTED REALITY // MOBILE FIELD TEST</div>
+      <h1>SUIT UP, SPIDEY.</h1>
+      <p>Scan real-world objects with your phone camera. Aim your crosshair at any item, flick your wrist DOWN to shoot your web, and pull your wrist BACK to reel it in!</p>
+
+      <div class="pose-guide">
+        <div class="pose-icon">🕸️</div>
+        <div class="pose-info">
+          <strong>WRIST DOWN TO SHOOT // WRIST BACK TO REEL</strong>
+          <span>Flick your wrist DOWN to fire web (or make Spidey pose / tap screen). Once attached, pull your wrist BACK to reel the object in! Open palm to release.</span>
+        </div>
+      </div>
+
+      <div class="pose-guide" style="border-color: rgba(102, 246, 255, 0.35); background: rgba(102, 246, 255, 0.07);">
+        <div class="pose-icon">🙌</div>
+        <div class="pose-info">
+          <strong style="color: var(--cyan);">HEAVY OBJECT 2-HAND PULL</strong>
+          <span>Chairs, laptops, bags & large boxes require BOTH hands to latch and reel!</span>
+        </div>
+      </div>
+
+      <button id="start" class="primary">ACTIVATE CAMERA &amp; SUIT HUD</button>
+      <p id="startup-error" class="startup-error" aria-live="polite" hidden></p>
+    </div>
+  </section>
+
+  <script type="module">
+    import { SpideyGame } from './js/game.js';
+    import { sound } from './js/audio.js';
+
+    const video = document.querySelector('#camera-feed');
+    const canvas = document.querySelector('#vision-overlay');
+    const startButton = document.querySelector('#start');
+    const startupError = document.querySelector('#startup-error');
+    const gate = document.querySelector('#gate');
+
+    const ui = {
+      statusText: document.querySelector('#status-text'),
+      statusBadge: document.querySelector('#status'),
+      handState: document.querySelector('#hand-state'),
+      handDetail: document.querySelector('#hand-detail'),
+      gestureMeter: document.querySelector('#gesture-meter'),
+      objectState: document.querySelector('#object-state'),
+      objectCount: document.querySelector('#object-count'),
+      toast: document.querySelector('#toast'),
+      caughtBanner: document.querySelector('#caught'),
+      gate,
+      startButton,
+    };
+
+    const game = new SpideyGame({ video, canvas, ui });
+
+    startButton.addEventListener('click', async () => {
+      startupError.hidden = true;
+      startButton.disabled = true;
+      startButton.textContent = 'INITIALIZING CAMERA & VISION…';
+
+      try {
+        await game.start();
+      } catch (err) {
+        console.error('Game startup failure:', err);
+        startupError.textContent = err.message || 'Camera or vision models failed to start. Check permissions and HTTPS.';
+        startupError.hidden = false;
+        startButton.disabled = false;
+        startButton.textContent = 'RETRY SUIT ACTIVATION';
+      }
+    });
+
+    document.querySelector('#cam-toggle').addEventListener('click', async () => {
+      await game.switchCamera();
+    });
+
+    document.querySelector('#shoot-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      game.triggerShootAction();
+    });
+
+    document.querySelector('#recenter').addEventListener('click', () => {
+      game.rescan();
+    });
+
+    const audioToggle = document.querySelector('#audio-toggle');
+    audioToggle.addEventListener('click', () => {
+      const isEnabled = sound.toggle();
+      audioToggle.textContent = isEnabled ? '🔊 AUDIO ON' : '🔇 AUDIO OFF';
+    });
+
+    window.addEventListener('pagehide', () => {
+      game.stop();
+    });
+  </script>
+</body>
+</html>
