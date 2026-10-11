@@ -104,21 +104,8 @@ export class SpideyGame {
       const rect = this.vision.boxToScreen(det.bbox);
       if (!rect || rect.w <= 0 || rect.h <= 0) continue;
 
-      // Do not target the player's own hand
-      if (this.vision.isHandDetection(rect)) continue;
-      let overlapsHand = false;
-      for (const hand of this.handStates) {
-        const muzzle = this.vision.pointToScreen(hand.shooterMuzzle);
-        const aim = this.vision.pointToScreen(hand.aimTarget);
-        if (
-          (muzzle.x >= rect.x && muzzle.x <= rect.x + rect.w && muzzle.y >= rect.y && muzzle.y <= rect.y + rect.h) ||
-          (aim.x >= rect.x && aim.x <= rect.x + rect.w && aim.y >= rect.y && aim.y <= rect.y + rect.h)
-        ) {
-          overlapsHand = true;
-          break;
-        }
-      }
-      if (overlapsHand) continue;
+      // Never target the player's own hand
+      if (this.vision.isHandDetection(rect, this.handStates)) continue;
 
       const center = { x: rect.x + rect.w * 0.5, y: rect.y + rect.h * 0.5 };
  
