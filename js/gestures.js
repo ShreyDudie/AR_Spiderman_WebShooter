@@ -1,9 +1,12 @@
 // Spider-Man Biometric Hand Scanner & 21-Joint Pose Tracker
 // Validates finger joint angles, detects the wrist-flick shoot gesture, and measures pull.
  
-const FLICK_SPEED = 3.4;       // palm-lengths per second (downward) needed to count as a flick
-const FLICK_WINDOW_MS = 220;   // how long a detected flick stays "active"
-const FLICK_COOLDOWN_MS = 600; // minimum time between two flicks of the same hand
+// Flick = a SMALL, quick downward wrist movement. Either of these triggers it:
+const FLICK_DISTANCE = 0.28;   // downward travel within the trail window, in palm-lengths (smaller = easier)
+const FLICK_SPEED = 1.6;       // or downward speed in palm-lengths per second (smaller = easier)
+const FLICK_TRAIL_MS = 320;    // how far back we look for the start of the movement
+const FLICK_WINDOW_MS = 320;   // how long a detected flick stays "active" (the game polls every frame)
+const FLICK_COOLDOWN_MS = 450; // minimum time between two flicks of the same hand
  
 function dist3D(p1, p2) {
   return Math.hypot(p1.x - p2.x, p1.y - p2.y, (p1.z || 0) - (p2.z || 0));
@@ -96,6 +99,7 @@ export class GestureAnalyzer {
         prevTime: now,
         velX: 0,
         velY: 0,
+        trail: [],
         flickUntil: 0,
         lastFlickAt: -Infinity,
         lastAimAt: -Infinity,
@@ -140,28 +144,43 @@ export class GestureAnalyzer {
     hist.smoothAim.x += (indexTip.x - hist.smoothAim.x) * 0.4;
     hist.smoothAim.y += (indexTip.y - hist.smoothAim.y) * 0.4;
  
-    // ---- Wrist flick detection (fast DOWNWARD motion, normalised by hand size) ----
+    // ---- Wrist flick detection (small downward motion, normalised by hand size) ----
+    // Uses the RAW muzzle point (no smoothing lag) so even a short, gentle flick registers.
     const dt = (now - hist.prevTime) / 1000;
     if (dt > 0.005 && dt < 0.25) {
-      const vx = (hist.smoothMuzzle.x - hist.prevMuzzle.x) / dt / hist.smoothPalmScale;
-      const vy = (hist.smoothMuzzle.y - hist.prevMuzzle.y) / dt / hist.smoothPalmScale;
-      hist.velX = hist.velX * 0.5 + vx * 0.5;
-      hist.velY = hist.velY * 0.5 + vy * 0.5;
+      const vx = (rawMuzzleX - hist.prevMuzzle.x) / dt / hist.smoothPalmScale;
+      const vy = (rawMuzzleY - hist.prevMuzzle.y) / dt / hist.smoothPalmScale;
+      hist.velX = hist.velX * 0.4 + vx * 0.6;
+      hist.velY = hist.velY * 0.4 + vy * 0.6;
     } else {
       hist.velX = 0;
       hist.velY = 0;
+      hist.trail.length = 0;
     }
-    hist.prevMuzzle.x = hist.smoothMuzzle.x;
-    hist.prevMuzzle.y = hist.smoothMuzzle.y;
+    hist.prevMuzzle.x = rawMuzzleX;
+    hist.prevMuzzle.y = rawMuzzleY;
     hist.prevTime = now;
  
-    if (
-      hist.velY > FLICK_SPEED &&
-      hist.velY > Math.abs(hist.velX) * 1.2 &&
-      now - hist.lastFlickAt > FLICK_COOLDOWN_MS
-    ) {
+    hist.trail.push({ t: now, x: rawMuzzleX, y: rawMuzzleY });
+    while (hist.trail.length > 1 && now - hist.trail[0].t > FLICK_TRAIL_MS) hist.trail.shift();
+ 
+    // how far the wrist has dropped from its highest point in the last ~0.3 s
+    let topY = rawMuzzleY;
+    let topX = rawMuzzleX;
+    for (const p of hist.trail) {
+      if (p.y < topY) { topY = p.y; topX = p.x; }
+    }
+    const dropDist = (rawMuzzleY - topY) / hist.smoothPalmScale;
+    const sideDist = Math.abs(rawMuzzleX - topX) / hist.smoothPalmScale;
+ 
+    const mostlyDown = (dx, dy) => dy > Math.abs(dx) * 0.8;
+    const bigEnoughDrop = dropDist > FLICK_DISTANCE && mostlyDown(sideDist, dropDist);
+    const fastEnoughDrop = hist.velY > FLICK_SPEED && mostlyDown(hist.velX, hist.velY);
+ 
+    if ((bigEnoughDrop || fastEnoughDrop) && now - hist.lastFlickAt > FLICK_COOLDOWN_MS) {
       hist.flickUntil = now + FLICK_WINDOW_MS;
       hist.lastFlickAt = now;
+      hist.trail.length = 0; // start fresh so one flick can't count twice
     }
     const isFlickDown = now < hist.flickUntil;
  
@@ -179,7 +198,7 @@ export class GestureAnalyzer {
       isOpenPalm: isOpenConfirmed,
       isFist: isFistConfirmed,
       isFlickDown,
-      flickSpeed: hist.velY,
+      flickSpeed: Math.max(hist.velY, dropDist * 4), // used by game.js to freeze the aim lock mid-flick
       pose,
       aimRecently,
       fistHeld,

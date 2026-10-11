@@ -240,7 +240,7 @@ export class SpideyGame {
     if (phase === 'AIM') {
       const lead = aimHands.find((h) => h.isSpideyPose) || aimHands[0];
       // freeze the lock while the wrist is flicking so the shot can't slide to another object
-      if (lead.isSpideyPose && lead.flickSpeed < 1.5) {
+      if (lead.isSpideyPose && lead.flickSpeed < 1.0) {
         const aim = this.vision.pointToScreen(lead.aimTarget);
         const target = this.getBestTarget(aim, 90);
         if (target && (!this.lockedTarget || this.lockedTarget.detection.id !== target.detection.id)) {
