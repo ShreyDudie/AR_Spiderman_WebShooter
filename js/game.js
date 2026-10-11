@@ -9,6 +9,11 @@ import { SpiderHUD } from './hud.js';
  
 const HAND_HOLD_MS = 150;      // keep last known hands briefly when a frame has no new result
 const SHOOT_COOLDOWN_MS = 750;
+const LOCK_GRACE_MS = 400;        // keep the aim lock this long after the fingertip drifts off the object (the flick itself moves it)
+const RELEASE_ARM_MS = 600;       // after latching, an open palm is ignored this long (the hand is still settling after the flick)
+const GIVE_UP_OPEN_MS = 450;      // never gripped + open palm held this long = player gave up -> release
+const HAND_ID_MEMORY_MS = 1500;   // how long a hand's identity (id 0 / 1) is remembered after it leaves tracking
+const HAND_ID_MATCH_DIST = 0.4;   // max normalised wrist travel between frames to count as the same hand
  
 export class SpideyGame {
   constructor(elements) {
@@ -30,6 +35,9 @@ export class SpideyGame {
     this.handStates = [];
     this.lastHandsSeenAt = -Infinity;
     this.lockedTarget = null;
+    this.lockSeenAt = 0;
+    this.collectedCount = 0;
+    this.handTrack = new Map(); // stable handId -> { x, y, t } (last wrist position)
     this.activeProjectiles = new Set();
     this.shotToken = 0; // bumps on release so in-flight webs from an old shot are ignored
     this.touchDrag = null;
@@ -126,14 +134,52 @@ export class SpideyGame {
     return best;
   }
  
+  // MediaPipe returns hands in an arbitrary order that can swap between frames. A web is tied to a
+  // handId, so a swap used to make the wrong hand pull / release it. Match hands to the previous
+  // frame by wrist position so each physical hand keeps the same id (0 or 1).
+  assignHandIds(rawHands, now) {
+    const n = Math.min(2, rawHands.landmarks.length);
+    for (const [id, p] of this.handTrack) {
+      if (now - p.t > HAND_ID_MEMORY_MS) this.handTrack.delete(id);
+    }
+    const wrists = [];
+    for (let i = 0; i < n; i++) wrists.push({ x: rawHands.landmarks[i][0].x, y: rawHands.landmarks[i][0].y });
+
+    const dist = (i, id) => {
+      const p = this.handTrack.get(id);
+      return p ? Math.hypot(wrists[i].x - p.x, wrists[i].y - p.y) : null;
+    };
+
+    const ids = [];
+    if (n === 1) {
+      let best = null;
+      let bestD = HAND_ID_MATCH_DIST;
+      for (const id of [0, 1]) {
+        const d = dist(0, id);
+        if (d != null && d < bestD) { bestD = d; best = id; }
+      }
+      if (best == null) best = !this.handTrack.has(0) ? 0 : !this.handTrack.has(1) ? 1 : (dist(0, 0) <= dist(0, 1) ? 0 : 1);
+      ids.push(best);
+    } else if (n === 2) {
+      const c = (i, id) => dist(i, id) ?? 0.5; // unknown history = neutral cost
+      const straight = c(0, 0) + c(1, 1);
+      const swapped = c(0, 1) + c(1, 0);
+      if (swapped < straight - 0.02) ids.push(1, 0);
+      else ids.push(0, 1);
+    }
+    for (let i = 0; i < n; i++) this.handTrack.set(ids[i], { ...wrists[i], t: now });
+    return ids;
+  }
+
   // Turn a fresh MediaPipe result into analysed hand states
   analyzeHands(rawHands, now) {
     const states = [];
-    for (let i = 0; i < rawHands.landmarks.length; i++) {
+    const ids = this.assignHandIds(rawHands, now);
+    for (let i = 0; i < ids.length; i++) {
       const landmarks = rawHands.landmarks[i];
       const worldLms = rawHands.worldLandmarks?.[i];
       const handedness = rawHands.handednesses?.[i]?.[0]?.categoryName || (i === 0 ? 'Right' : 'Left');
-      const analysis = this.gestures.analyzeHand(landmarks, worldLms, handedness, i, now);
+      const analysis = this.gestures.analyzeHand(landmarks, worldLms, handedness, ids[i], now);
       if (analysis) states.push(analysis);
     }
     return states;
@@ -201,6 +247,39 @@ export class SpideyGame {
     return pullMap;
   }
  
+  // Decides whether the player has let go of the web.
+  //  - Only the hands actually tethered to the object count (an idle open hand elsewhere used to drop the web).
+  //  - A hand that has gripped (fist) and then opens releases IMMEDIATELY, no timers.
+  //  - A hand that never gripped is ignored right after the flick; if it then stays open ~0.45s the
+  //    player has given up, so the web is released.
+  checkGestureRelease(now, latched) {
+    const age = now - latched.attachTime;
+    let anyGripping = false;
+    let giveUp = false;
+
+    for (const [handId, tether] of latched.tethers.entries()) {
+      const hand = this.handStates.find((h) => h.handId === handId);
+      if (!hand) continue;
+
+      if (hand.isFist || hand.fistHeld) {
+        tether.engaged = true;
+        tether.openSince = null;
+        anyGripping = true;
+        continue;
+      }
+
+      if (tether.engaged) {
+        if (hand.isHandReleased || hand.isOpenPalm) return true;
+      } else if (age > RELEASE_ARM_MS && hand.isOpenPalm) {
+        if (tether.openSince == null) tether.openSince = now;
+        if (now - tether.openSince > GIVE_UP_OPEN_MS) giveUp = true;
+      } else {
+        tether.openSince = null;
+      }
+    }
+    return giveUp && !anyGripping;
+  }
+
   isAimHand(h) {
     return !!(h && (h.isSpideyPose || h.aimRecently));
   }
@@ -223,8 +302,8 @@ export class SpideyGame {
  
     const latched = this.arObjects.latchedTarget;
 
-    // Prompt release when hand is opened or fist released
-    if (latched && this.handStates.some((h) => h.isOpenPalm || h.openHeld || h.isHandReleased || h.pose === 'OPEN')) {
+    // Release the instant the pulling hand lets go (see checkGestureRelease)
+    if (latched && this.checkGestureRelease(now, latched)) {
       this.releaseWeb('Hand released');
       return;
     }
@@ -247,11 +326,17 @@ export class SpideyGame {
       if (lead.isSpideyPose && lead.flickProgress < 0.25 && lead.flickSpeed < 1.0) {
         const aim = this.vision.pointToScreen(lead.aimTarget);
         const target = this.getBestTarget(aim, 90);
-        if (target && (!this.lockedTarget || this.lockedTarget.detection.id !== target.detection.id)) {
-          sound.playSpiderSense();
+        if (target) {
+          if (!this.lockedTarget || this.lockedTarget.detection.id !== target.detection.id) {
+            sound.playSpiderSense();
+          }
+          this.lockedTarget = target;
+          this.lockSeenAt = now;
+        } else if (this.lockedTarget && now - this.lockSeenAt > LOCK_GRACE_MS) {
+          this.lockedTarget = null; // crosshair has been off the object for a while
         }
-        this.lockedTarget = target;
       }
+      this.refreshLockedTarget();
     } else if (phase === 'IDLE' || latched) {
       this.lockedTarget = null;
     }
@@ -298,6 +383,20 @@ export class SpideyGame {
     );
   }
  
+  // Keep the locked target's box in step with the tracker (it moves if the object / camera moves)
+  refreshLockedTarget() {
+    const t = this.lockedTarget;
+    if (!t) return;
+    const det = this.vision.trackedDetections.find((d) => d.id === t.detection.id);
+    if (!det) return;
+    const rect = this.vision.boxToScreen(det.bbox);
+    if (!rect || rect.w <= 0 || rect.h <= 0) return;
+    if (this.vision.isHandDetection(rect, this.handStates)) return;
+    t.detection = det;
+    t.rect = rect;
+    t.center = { x: rect.x + rect.w * 0.5, y: rect.y + rect.h * 0.5 };
+  }
+
   // Movement 3: from the AIM pose, a quick wrist flick DOWN fires the web at the locked target
   tryGestureShoot(now, aimHands) {
     const target = this.lockedTarget;
@@ -349,6 +448,7 @@ export class SpideyGame {
   // hands: array of analysed hand states (empty array = fire from the bottom of the screen)
   tryShootWeb(hands, target) {
     if (!target) return;
+    if (target === this.lockedTarget) this.refreshLockedTarget(); // aim + snapshot use the freshest box
     const shooters = hands.length ? hands : [null];
     const token = this.shotToken;
  
@@ -411,10 +511,6 @@ export class SpideyGame {
   }
  
   releaseWeb(reason = '') {
-    if (this.caughtReleaseTimer) {
-      clearTimeout(this.caughtReleaseTimer);
-      this.caughtReleaseTimer = null;
-    }
     this.shotToken++;
     this.activeProjectiles.clear();
     const released = this.arObjects.release();
@@ -434,7 +530,10 @@ export class SpideyGame {
   }
  
   updateObjectScanning(now) {
-    const detections = this.vision.detectObjects(now);
+    // The object detector runs on the main thread (~tens of ms per pass). While a web is in flight or
+    // latched we don't need new detections, and running it caused the stutter while reeling in.
+    const webBusy = !!this.arObjects.latchedTarget || this.activeProjectiles.size > 0;
+    const detections = webBusy ? this.vision.trackedDetections : this.vision.detectObjects(now);
     if (this.ui.objectCount) {
       this.ui.objectCount.textContent = `${detections.length} DETECTED`;
     }
@@ -458,23 +557,21 @@ export class SpideyGame {
     }
 
     if (update.status === 'CAUGHT') {
+      // Reported exactly once per object (it used to repeat every frame: sound spam + banner restarts)
+      this.collectedCount++;
       sound.stopTension();
       sound.playCatch();
       this.showCaughtBanner(update.target.detection.class);
       this.hud.spawnBurst(update.target.renderPos);
-
-      // Auto-release after caught celebration
-      if (!this.caughtReleaseTimer) {
-        this.caughtReleaseTimer = setTimeout(() => {
-          this.caughtReleaseTimer = null;
-          if (this.arObjects.latchedTarget?.isCaught) {
-            this.releaseWeb();
-          }
-        }, 900);
-      }
       return;
     }
- 
+
+    if (update.status === 'COLLECTED') {
+      const label = update.target.detection.class;
+      this.releaseWeb(`${label} collected · total ${this.collectedCount}`);
+      return;
+    }
+
     if (update.status === 'REELING') {
       sound.updateTension(update.tension);
  

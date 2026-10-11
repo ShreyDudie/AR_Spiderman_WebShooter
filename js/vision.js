@@ -23,7 +23,7 @@ function boxIoU(boxA, boxB) {
   const bx1 = boxB[0], by1 = boxB[1], bx2 = boxB[0] + boxB[2], by2 = boxB[1] + boxB[3];
 
   const ix1 = Math.max(ax1, bx1);
-  const iy1 = Math.max(ay1, bx1);
+  const iy1 = Math.max(ay1, by1);
   const ix2 = Math.min(ax2, bx2);
   const iy2 = Math.min(ay2, by2);
 
@@ -302,8 +302,14 @@ export class VisionPipeline {
       const vh = this.video.videoHeight;
       if (!vw || !vh) return null;
  
-      const w = Math.max(32, Math.round(screenBox.w));
-      const h = Math.max(32, Math.round(screenBox.h));
+      // Capture at the camera's real pixel density (up to 2x screen size, max 640px on the long
+      // side) so the cutout stays sharp when it is scaled up to ~2.8x while being reeled in.
+      const probeW = this.screenToBox(screenBox)[2];
+      const density = Math.max(1, Math.min(2, probeW / Math.max(1, screenBox.w)));
+      const longSide = Math.max(screenBox.w, screenBox.h) * density;
+      const capScale = longSide > 640 ? 640 / longSide : 1;
+      const w = Math.max(32, Math.round(screenBox.w * density * capScale));
+      const h = Math.max(32, Math.round(screenBox.h * density * capScale));
  
       const snapCanvas = document.createElement('canvas');
       snapCanvas.width = w;
@@ -322,6 +328,7 @@ export class VisionPipeline {
         sctx.translate(w, 0);
         sctx.scale(-1, 1);
       }
+      sctx.imageSmoothingQuality = 'high';
       sctx.drawImage(this.video, srcX, srcY, srcW, srcH, 0, 0, w, h);
       sctx.restore();
  
@@ -360,7 +367,9 @@ export class VisionPipeline {
           const dy = (y - cy) / ry;
           for (let x = 0; x < w; x++) {
             const dx = (x - cx) / rx;
-            const normDist = Math.sqrt(dx * dx + dy * dy);
+            // Superellipse (n=4) instead of a plain ellipse: keeps the corners of boxy objects
+            // (phones, books, keyboards) instead of chopping them off.
+            const normDist = Math.pow(dx * dx * dx * dx + dy * dy * dy * dy, 0.25);
             const idx = (y * w + x) * 4;
  
             const r = data[idx];

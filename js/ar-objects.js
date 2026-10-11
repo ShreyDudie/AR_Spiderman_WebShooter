@@ -2,6 +2,11 @@
 // Brings ONLY the visual cutout of the real object closer with realistic 3D depth (NO bounding boxes!)
 // Heavy objects (chairs, laptops, bags...) need TWO web tethers, and BOTH hands must pull.
  
+const CATCH_PROGRESS = 0.85;   // pull progress at which the object counts as reeled in
+const COLLECT_MS = 420;        // length of the "zip into the hand" collection animation
+const HAND_LOST_MS = 650;      // how long a pulling hand may vanish from tracking before the web drops
+const IDLE_RELEASE_MS = 4000;  // latched but nobody gripping for this long -> let go
+
 export class ARObjectManager {
   constructor() {
     this.latchedTarget = null;
@@ -31,8 +36,12 @@ export class ARObjectManager {
       isCaught: false,
       attachTime: performance.now(),
       lastTension: 0,
-      lostHandFrames: 0,
+      handLostSince: null,
       lastValidMuzzle: { ...startMuzzle },
+      lastUpdate: performance.now(),
+      alpha: 1,
+      caughtAt: 0,
+      collectFrom: null,
       waitingForHands: heavy,
       isPulling: false,
       lastPullTime: performance.now(),
@@ -56,6 +65,8 @@ export class ARObjectManager {
       handId,
       startMuzzle: { ...startMuzzle },
       curMuzzle: { ...startMuzzle },
+      engaged: false,   // true once this strand's hand has made a fist (so opening it later = release)
+      openSince: null,  // when the hand started showing an open palm without ever gripping
       pullAnchor: null, // set when the fist closes; pull is measured from here
       tension: 0,
       pullAmount: 0,
@@ -65,28 +76,33 @@ export class ARObjectManager {
   update(handStates, vision, now = performance.now()) {
     const target = this.latchedTarget;
     if (!target) return null;
- 
+
+    // Frame-rate independent timing (dt clamped so a tab stall can't teleport the object)
+    const dt = Math.max(0.001, Math.min(0.05, (now - (target.lastUpdate ?? now)) / 1000));
+    target.lastUpdate = now;
+    const frames60 = dt * 60;
+
     let presentTethers = 0;
     let totalTension = 0;
     let tensionCount = 0;
-    let primaryMuzzle = null;
+    const muzzles = [];
     const activePulls = [];
- 
+
     for (const [handId, tether] of target.tethers.entries()) {
       const hand = handStates.find((h) => h && h.handId === handId);
       const pd = vision.pullDataMap?.get(handId);
       const touchDriven = !!(pd && pd.touch);
- 
+
       if (!hand && !touchDriven) {
         tether.pullAmount = 0;
         tether.tension = 0;
         continue;
       }
- 
+
       presentTethers++;
       if (hand) tether.curMuzzle = vision.pointToScreen(hand.shooterMuzzle);
-      if (!primaryMuzzle) primaryMuzzle = tether.curMuzzle;
- 
+      muzzles.push(tether.curMuzzle);
+
       // Movement 4 (pull) only counts while this strand's hand is making a fist (or touch-dragging)
       if (pd && pd.active) {
         tether.pullAmount = pd.pullAmount;
@@ -99,18 +115,54 @@ export class ARObjectManager {
         tether.tension = 0;
       }
     }
- 
+
+    // Where the object is being pulled to: the average of all present hands (no jumping between hands)
+    let primaryMuzzle = null;
+    if (muzzles.length) {
+      primaryMuzzle = {
+        x: muzzles.reduce((sum, m) => sum + m.x, 0) / muzzles.length,
+        y: muzzles.reduce((sum, m) => sum + m.y, 0) / muzzles.length,
+      };
+    }
+
     if (presentTethers === 0) {
-      target.lostHandFrames = (target.lostHandFrames || 0) + 1;
-      if (target.lostHandFrames > 15) {
+      // Hand tracking drops out a lot when a fist moves fast toward the camera, so be forgiving (by time, not frames)
+      if (target.handLostSince == null) target.handLostSince = now;
+      if (!target.isCaught && now - target.handLostSince > HAND_LOST_MS) {
         return { status: 'HAND_LOST', target };
       }
       primaryMuzzle = target.lastValidMuzzle || target.renderPos;
     } else {
-      target.lostHandFrames = 0;
+      target.handLostSince = null;
       target.lastValidMuzzle = { ...primaryMuzzle };
     }
- 
+
+    // ---- Collection: object zips into the hand, shrinking and fading ----
+    if (target.isCaught) {
+      const t = Math.max(0, Math.min(1, (now - target.caughtAt) / COLLECT_MS));
+      const e = t * t * (3 - 2 * t); // smoothstep
+      const from = target.collectFrom;
+      const prevX = target.renderPos.x;
+      target.renderPos.x = from.x + (primaryMuzzle.x - from.x) * e;
+      target.renderPos.y = from.y + (primaryMuzzle.y - from.y) * e;
+      target.velocity.x = (target.renderPos.x - prevX) / Math.max(0.5, frames60);
+      target.currentScale = from.scale * (1 - 0.72 * e);
+      target.alpha = 1 - Math.max(0, Math.min(1, (t - 0.55) / 0.45));
+      target.tiltAngle *= 0.9;
+      target.lastTension *= 0.85;
+      target.isPulling = false;
+
+      if (t >= 1) return { status: 'COLLECTED', target };
+      return {
+        status: 'COLLECTING',
+        target,
+        pullProgress: target.pullProgress,
+        tension: target.lastTension,
+        activeTethers: presentTethers,
+        waitingForHands: false,
+      };
+    }
+
     // Light objects: any fist pulling moves it. Heavy objects: EVERY required strand must be
     // attached AND pulling (both fists), so the effective pull is the weakest strand.
     // When nobody is pulling the object simply HOLDS where it is.
@@ -131,48 +183,37 @@ export class ARObjectManager {
     }
     if (!target.lastPullTime) target.lastPullTime = now;
 
-    // Inactivity release: if latched and not pulling for 2.5 seconds, release the object
-    if (!target.isCaught && now - target.lastPullTime > 2500) {
+    // Inactivity release: latched but nobody has been gripping for a while -> let the object go
+    if (now - target.lastPullTime > IDLE_RELEASE_MS) {
       return { status: 'IDLE_TIMEOUT', target };
     }
 
     targetProgress = Math.max(0, Math.min(1.0, targetProgress));
-    target.pullProgress += (targetProgress - target.pullProgress) * 0.25;
- 
+    // Same feel as the old 0.25-per-frame easing at 60fps, but independent of the frame rate
+    target.pullProgress += (targetProgress - target.pullProgress) * (1 - Math.pow(0.75, frames60));
+
     const destX = target.originalCenter.x + (primaryMuzzle.x - target.originalCenter.x) * target.pullProgress * 0.8;
     const destY = target.originalCenter.y + (primaryMuzzle.y - target.originalCenter.y) * target.pullProgress * 0.8;
- 
-    const kSpring = 0.4;
-    const cDamping = 0.7;
-    const fx = (destX - target.renderPos.x) * kSpring;
-    const fy = (destY - target.renderPos.y) * kSpring;
- 
-    target.velocity.x = (target.velocity.x + fx) * cDamping;
-    target.velocity.y = (target.velocity.y + fy) * cDamping;
- 
-    target.renderPos.x += target.velocity.x;
-    target.renderPos.y += target.velocity.y;
- 
+
+    // Critically-damped follow (no spring overshoot / wobble, and hand jitter gets smoothed out)
+    const follow = 1 - Math.exp(-dt / 0.07);
+    const prevX = target.renderPos.x;
+    target.renderPos.x += (destX - target.renderPos.x) * follow;
+    target.renderPos.y += (destY - target.renderPos.y) * follow;
+    target.velocity.x = (target.renderPos.x - prevX) / Math.max(0.5, frames60);
+    target.velocity.y = 0;
+
     target.currentScale = 1.0 + target.pullProgress * 1.8;
     target.tiltAngle = Math.max(-0.25, Math.min(0.25, target.velocity.x * 0.015));
- 
+
     const avgTension = tensionCount ? Math.min(1.0, totalTension / tensionCount) : 0;
     target.lastTension = target.isPulling ? avgTension : target.lastTension * 0.85;
- 
-    if (target.pullProgress >= 0.85 && !target.isCaught) {
-      target.isCaught = true;
-      return { status: 'CAUGHT', target };
-    }
 
-    if (target.isCaught) {
-      return {
-        status: 'CAUGHT',
-        target,
-        pullProgress: target.pullProgress,
-        tension: target.lastTension,
-        activeTethers: presentTethers,
-        waitingForHands: false,
-      };
+    if (target.pullProgress >= CATCH_PROGRESS) {
+      target.isCaught = true;
+      target.caughtAt = now;
+      target.collectFrom = { x: target.renderPos.x, y: target.renderPos.y, scale: target.currentScale };
+      return { status: 'CAUGHT', target }; // reported exactly ONCE; COLLECTING / COLLECTED follow
     }
 
     return {
@@ -184,7 +225,7 @@ export class ARObjectManager {
       waitingForHands: target.waitingForHands,
     };
   }
- 
+
   // Render ONLY the contour cutout of the object without rectangular boxes
   draw(ctx, now) {
     const target = this.latchedTarget;
@@ -193,6 +234,8 @@ export class ARObjectManager {
     const { renderPos, originalCenter, screenBox, snapshotCanvas, currentScale, tiltAngle, pullProgress } = target;
  
     ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, target.alpha ?? 1)); // fades out while being collected
+    ctx.imageSmoothingQuality = 'high';
  
     if (pullProgress > 0.03) {
       ctx.save();

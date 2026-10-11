@@ -10,6 +10,16 @@ const FLICK_MIN_SPEED = 1.0;   // slower drifts (e.g. just moving your hand down
 const FLICK_TRAIL_MS = 360;    // how far back we look for the start of the movement
 const FLICK_WINDOW_MS = 350;   // how long a detected flick stays "active" (the game polls every frame)
 const FLICK_COOLDOWN_MS = 350; // minimum time between two flicks of the same hand
+
+// ---- Grip (fist) / release tuning ----
+// "Openness" = mean distance of the 4 fingertips from the palm centre, in palm-lengths.
+// A closed fist sits around 0.3-0.7, a flat open hand around 1.3-1.7.
+const FIST_ENTER = 0.72;       // openness below this counts as a fist even if the strict joint test fails
+const FIST_EXIT = 0.95;        // once gripping, openness must rise above this to stop counting as a fist (hysteresis)
+const RELEASE_OPEN = 1.0;      // fingers uncurled past this after a grip = the player let go
+const STRONG_OPEN = 1.1;       // clearly past the fist range: react on a single frame instead of two
+const FIST_GRACE_MS = 180;     // short tracking-dropout grace for "still gripping"
+const RELEASE_FLAG_MS = 350;   // how long isHandReleased stays raised after the grip opens
  
 function dist3D(p1, p2) {
   return Math.hypot(p1.x - p2.x, p1.y - p2.y, (p1.z || 0) - (p2.z || 0));
@@ -83,6 +93,14 @@ export class GestureAnalyzer {
  
     const isThumbExtended = dist3D(thumbTip, indexMCP) > palmScale * 0.65;
 
+    // Continuous finger-curl measure used for grip / release (much less jumpy than boolean joint tests)
+    const opennessAvg =
+      (dist3D(indexTip, palmCenter) +
+        dist3D(middleTip, palmCenter) +
+        dist3D(ringTip, palmCenter) +
+        dist3D(pinkyTip, palmCenter)) /
+      (4 * palmScale);
+
     // Finger extension checks
     const isMiddleExtended = middleAnglePIP > 135 && dist3D(middleTip, palmCenter) > palmScale * 1.0;
     const isRingExtended = ringAnglePIP > 135 && dist3D(ringTip, palmCenter) > palmScale * 1.0;
@@ -121,17 +139,38 @@ export class GestureAnalyzer {
         lastAimAt: -Infinity,
         lastFistAt: -Infinity,
         openSince: null,
+        fistOn: false,
+        fistMiss: 0,
+        releasedUntil: 0,
       };
       this.history.set(handId, hist);
     }
 
+    // ---- Fist with hysteresis ----
+    // Enter: strict joint test OR clearly curled fingers. Stay: until the fingers are clearly uncurled.
+    // Leave: needs 2 consecutive non-fist frames, or just 1 when the hand is unmistakably open.
+    // (Before, one noisy frame during a pull counted as "released" and dropped the web.)
+    const fistRaw =
+      isFistStrict ||
+      opennessAvg < FIST_ENTER ||
+      (hist.fistOn && opennessAvg < FIST_EXIT && !isOpenPalm);
+
     hist.spideyStreak = isSpideyPoseStrict ? hist.spideyStreak + 1 : 0;
     hist.openStreak = isOpenPalm ? hist.openStreak + 1 : 0;
-    hist.fistStreak = isFistStrict ? hist.fistStreak + 1 : 0;
+    if (fistRaw) {
+      hist.fistStreak++;
+      hist.fistMiss = 0;
+    } else {
+      hist.fistStreak = 0;
+      hist.fistMiss++;
+    }
 
+    const missNeeded = opennessAvg >= STRONG_OPEN ? 1 : 2;
     const isSpideyConfirmed = hist.spideyStreak >= 3;
     const isOpenConfirmed = hist.openStreak >= 2;
-    const isFistConfirmed = hist.fistStreak >= 2;
+    const isFistConfirmed = hist.fistStreak >= 2 || (hist.fistOn && hist.fistMiss < missNeeded);
+    const justUngripped = hist.fistOn && !isFistConfirmed;
+    hist.fistOn = isFistConfirmed;
 
     // Timers used by the 4-movement state machine
     if (isSpideyConfirmed) hist.lastAimAt = now;
@@ -141,13 +180,21 @@ export class GestureAnalyzer {
     } else {
       hist.openSince = null;
     }
+
+    // Letting go: the grip just ended AND the fingers are uncurling / open.
+    if (justUngripped && (isOpenPalm || opennessAvg >= RELEASE_OPEN)) {
+      hist.releasedUntil = now + RELEASE_FLAG_MS;
+    }
+    if (isFistConfirmed) hist.releasedUntil = 0;
+
     const aimRecently = now - hist.lastAimAt < 600;   // aim pose held a moment ago (survives the flick)
-    const fistHeld = now - hist.lastFistAt < 250;     // fist, with a short grace for tracking dropouts
-    const openHeld = hist.openSince != null && (now - hist.openSince > 120 || isOpenConfirmed); // fast, responsive open palm
-    const wasFisting = now - hist.lastFistAt < 500 && !isFistConfirmed;
-    const isHandReleased = wasFisting && (isOpenConfirmed || isOpenPalm || !isFistStrict);
+    const isHandReleased = now < hist.releasedUntil;
+    const fistHeld =
+      isFistConfirmed ||
+      (now - hist.lastFistAt < FIST_GRACE_MS && !isHandReleased && !isOpenPalm && opennessAvg < FIST_EXIT);
+    const openHeld = hist.openSince != null && (now - hist.openSince > 120 || isOpenConfirmed);
     const pose = isSpideyConfirmed ? 'AIM' : isFistConfirmed ? 'FIST' : isOpenConfirmed ? 'OPEN' : 'IDLE';
- 
+
     hist.smoothWrist.x += (wrist.x - hist.smoothWrist.x) * 0.35;
     hist.smoothWrist.y += (wrist.y - hist.smoothWrist.y) * 0.35;
     hist.smoothWrist.z += ((wrist.z || 0) - hist.smoothWrist.z) * 0.35;
@@ -243,6 +290,7 @@ export class GestureAnalyzer {
       fistHeld,
       openHeld,
       isHandReleased,
+      opennessAvg,
       jointStates: {
         indexExtended: isIndexExtended,
         pinkyExtended: isPinkyExtended,
@@ -276,7 +324,8 @@ export class GestureAnalyzer {
     const directionalPull = moveX * dirX + moveY * dirY;
     const downwardPull = moveY * 0.6;
  
-    const motionPull = Math.max(0, Math.max(directionalPull, downwardPull) / 110);
+    // 6px dead zone so an idle fist's tracking jitter doesn't register as pulling
+    const motionPull = Math.max(0, (Math.max(directionalPull, downwardPull) - 6) / 110);
  
     const anchorScale = Math.max(0.04, anchor.palmScale);
     const curScale = Math.max(0.04, currentHand.palmScale);
