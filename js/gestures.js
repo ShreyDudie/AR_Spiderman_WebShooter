@@ -82,11 +82,24 @@ export class GestureAnalyzer {
       dist3D(ringTip, wrist) < dist3D(ringPIP, wrist) * 1.05;
  
     const isThumbExtended = dist3D(thumbTip, indexMCP) > palmScale * 0.65;
- 
+
+    // Finger extension checks
+    const isMiddleExtended = middleAnglePIP > 135 && dist3D(middleTip, palmCenter) > palmScale * 1.0;
+    const isRingExtended = ringAnglePIP > 135 && dist3D(ringTip, palmCenter) > palmScale * 1.0;
+
     const isSpideyPoseStrict = isIndexExtended && isPinkyExtended && isMiddleCurled && isRingCurled;
     const isOpenPalmStrict = isIndexExtended && !isMiddleCurled && !isRingCurled && isPinkyExtended;
     const isFistStrict = !isIndexExtended && isMiddleCurled && isRingCurled && !isPinkyExtended;
- 
+
+    // Natural open / released hand: fingers uncurled from palm (not a fist)
+    const isOpenPalmNatural =
+      !isFistStrict &&
+      dist3D(middleTip, palmCenter) > palmScale * 0.88 &&
+      dist3D(ringTip, palmCenter) > palmScale * 0.88 &&
+      (isIndexExtended || isMiddleExtended || isRingExtended || isPinkyExtended);
+
+    const isOpenPalm = isOpenPalmStrict || isOpenPalmNatural;
+
     // Temporal smoothing across consecutive frames
     let hist = this.history.get(handId);
     if (!hist) {
@@ -111,15 +124,15 @@ export class GestureAnalyzer {
       };
       this.history.set(handId, hist);
     }
- 
+
     hist.spideyStreak = isSpideyPoseStrict ? hist.spideyStreak + 1 : 0;
-    hist.openStreak = isOpenPalmStrict ? hist.openStreak + 1 : 0;
+    hist.openStreak = isOpenPalm ? hist.openStreak + 1 : 0;
     hist.fistStreak = isFistStrict ? hist.fistStreak + 1 : 0;
- 
+
     const isSpideyConfirmed = hist.spideyStreak >= 3;
     const isOpenConfirmed = hist.openStreak >= 2;
     const isFistConfirmed = hist.fistStreak >= 2;
- 
+
     // Timers used by the 4-movement state machine
     if (isSpideyConfirmed) hist.lastAimAt = now;
     if (isFistConfirmed) hist.lastFistAt = now;
@@ -130,7 +143,9 @@ export class GestureAnalyzer {
     }
     const aimRecently = now - hist.lastAimAt < 600;   // aim pose held a moment ago (survives the flick)
     const fistHeld = now - hist.lastFistAt < 250;     // fist, with a short grace for tracking dropouts
-    const openHeld = hist.openSince != null && now - hist.openSince > 450; // deliberate open palm
+    const openHeld = hist.openSince != null && (now - hist.openSince > 120 || isOpenConfirmed); // fast, responsive open palm
+    const wasFisting = now - hist.lastFistAt < 500 && !isFistConfirmed;
+    const isHandReleased = wasFisting && (isOpenConfirmed || isOpenPalm || !isFistStrict);
     const pose = isSpideyConfirmed ? 'AIM' : isFistConfirmed ? 'FIST' : isOpenConfirmed ? 'OPEN' : 'IDLE';
  
     hist.smoothWrist.x += (wrist.x - hist.smoothWrist.x) * 0.35;
@@ -227,6 +242,7 @@ export class GestureAnalyzer {
       aimRecently,
       fistHeld,
       openHeld,
+      isHandReleased,
       jointStates: {
         indexExtended: isIndexExtended,
         pinkyExtended: isPinkyExtended,

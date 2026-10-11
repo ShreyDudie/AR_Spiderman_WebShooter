@@ -35,6 +35,7 @@ export class ARObjectManager {
       lastValidMuzzle: { ...startMuzzle },
       waitingForHands: heavy,
       isPulling: false,
+      lastPullTime: performance.now(),
     };
  
     return this.latchedTarget;
@@ -61,7 +62,7 @@ export class ARObjectManager {
     };
   }
  
-  update(handStates, vision) {
+  update(handStates, vision, now = performance.now()) {
     const target = this.latchedTarget;
     if (!target) return null;
  
@@ -101,7 +102,7 @@ export class ARObjectManager {
  
     if (presentTethers === 0) {
       target.lostHandFrames = (target.lostHandFrames || 0) + 1;
-      if (target.lostHandFrames > 40) {
+      if (target.lostHandFrames > 15) {
         return { status: 'HAND_LOST', target };
       }
       primaryMuzzle = target.lastValidMuzzle || target.renderPos;
@@ -124,7 +125,17 @@ export class ARObjectManager {
       if (activePulls.length) targetProgress = Math.max(...activePulls);
     }
     target.isPulling = tensionCount > 0 && !target.waitingForHands;
- 
+
+    if (activePulls.length > 0 && tensionCount > 0) {
+      target.lastPullTime = now;
+    }
+    if (!target.lastPullTime) target.lastPullTime = now;
+
+    // Inactivity release: if latched and not pulling for 2.5 seconds, release the object
+    if (!target.isCaught && now - target.lastPullTime > 2500) {
+      return { status: 'IDLE_TIMEOUT', target };
+    }
+
     targetProgress = Math.max(0, Math.min(1.0, targetProgress));
     target.pullProgress += (targetProgress - target.pullProgress) * 0.25;
  
@@ -152,7 +163,18 @@ export class ARObjectManager {
       target.isCaught = true;
       return { status: 'CAUGHT', target };
     }
- 
+
+    if (target.isCaught) {
+      return {
+        status: 'CAUGHT',
+        target,
+        pullProgress: target.pullProgress,
+        tension: target.lastTension,
+        activeTethers: presentTethers,
+        waitingForHands: false,
+      };
+    }
+
     return {
       status: 'REELING',
       target,

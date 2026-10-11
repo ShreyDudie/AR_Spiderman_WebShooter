@@ -7,7 +7,7 @@ import { WebSystem } from './web.js';
 import { ARObjectManager } from './ar-objects.js';
 import { SpiderHUD } from './hud.js';
  
-const HAND_HOLD_MS = 300;      // keep last known hands this long when a frame has no new result
+const HAND_HOLD_MS = 150;      // keep last known hands briefly when a frame has no new result
 const SHOOT_COOLDOWN_MS = 750;
  
 export class SpideyGame {
@@ -103,6 +103,23 @@ export class SpideyGame {
     for (const det of detections) {
       const rect = this.vision.boxToScreen(det.bbox);
       if (!rect || rect.w <= 0 || rect.h <= 0) continue;
+
+      // Do not target the player's own hand
+      if (this.vision.isHandDetection(rect)) continue;
+      let overlapsHand = false;
+      for (const hand of this.handStates) {
+        const muzzle = this.vision.pointToScreen(hand.shooterMuzzle);
+        const aim = this.vision.pointToScreen(hand.aimTarget);
+        if (
+          (muzzle.x >= rect.x && muzzle.x <= rect.x + rect.w && muzzle.y >= rect.y && muzzle.y <= rect.y + rect.h) ||
+          (aim.x >= rect.x && aim.x <= rect.x + rect.w && aim.y >= rect.y && aim.y <= rect.y + rect.h)
+        ) {
+          overlapsHand = true;
+          break;
+        }
+      }
+      if (overlapsHand) continue;
+
       const center = { x: rect.x + rect.w * 0.5, y: rect.y + rect.h * 0.5 };
  
       const dx = Math.max(rect.x - ref.x, 0, ref.x - (rect.x + rect.w));
@@ -218,10 +235,10 @@ export class SpideyGame {
     this.vision.pullDataMap = this.buildPullMap();
  
     const latched = this.arObjects.latchedTarget;
- 
-    // Deliberate open palm while attached = let go
-    if (latched && this.handStates.some((h) => h.openHeld)) {
-      this.releaseWeb('Web released');
+
+    // Prompt release when hand is opened or fist released
+    if (latched && this.handStates.some((h) => h.isOpenPalm || h.openHeld || h.isHandReleased || h.pose === 'OPEN')) {
+      this.releaseWeb('Hand released');
       return;
     }
  
@@ -407,6 +424,10 @@ export class SpideyGame {
   }
  
   releaseWeb(reason = '') {
+    if (this.caughtReleaseTimer) {
+      clearTimeout(this.caughtReleaseTimer);
+      this.caughtReleaseTimer = null;
+    }
     this.shotToken++;
     this.activeProjectiles.clear();
     const released = this.arObjects.release();
@@ -436,19 +457,34 @@ export class SpideyGame {
   }
  
   updateReelingPhysics(now) {
-    const update = this.arObjects.update(this.handStates, this.vision);
+    const update = this.arObjects.update(this.handStates, this.vision, now);
     if (!update) return;
- 
+
     if (update.status === 'HAND_LOST') {
       this.releaseWeb('Hand lost — web released');
       return;
     }
- 
+
+    if (update.status === 'IDLE_TIMEOUT') {
+      this.releaseWeb('Web released');
+      return;
+    }
+
     if (update.status === 'CAUGHT') {
       sound.stopTension();
       sound.playCatch();
       this.showCaughtBanner(update.target.detection.class);
       this.hud.spawnBurst(update.target.renderPos);
+
+      // Auto-release after caught celebration
+      if (!this.caughtReleaseTimer) {
+        this.caughtReleaseTimer = setTimeout(() => {
+          this.caughtReleaseTimer = null;
+          if (this.arObjects.latchedTarget?.isCaught) {
+            this.releaseWeb();
+          }
+        }, 900);
+      }
       return;
     }
  

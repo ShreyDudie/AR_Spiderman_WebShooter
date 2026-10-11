@@ -204,6 +204,92 @@ export class VisionPipeline {
     const by = (rect.y + cropY) / scale;
     return [bx, by, rect.w / scale, rect.h / scale];
   }
+
+  // Calculate screen-space bounding box for hand landmarks with padding
+  getHandScreenBounds(landmarks) {
+    if (!landmarks || landmarks.length === 0) return null;
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    const screenPoints = [];
+    for (const p of landmarks) {
+      const sp = this.pointToScreen(p);
+      screenPoints.push(sp);
+      if (sp.x < minX) minX = sp.x;
+      if (sp.x > maxX) maxX = sp.x;
+      if (sp.y < minY) minY = sp.y;
+      if (sp.y > maxY) maxY = sp.y;
+    }
+    const width = maxX - minX;
+    const height = maxY - minY;
+    // Pad hand box by 25% to cover knuckles, fingertips, and wrist/forearm
+    const padX = Math.max(15, width * 0.25);
+    const padY = Math.max(15, height * 0.25);
+    return {
+      minX: minX - padX,
+      maxX: maxX + padX,
+      minY: minY - padY,
+      maxY: maxY + padY * 1.4, // expand downwards for wrist/forearm
+      screenPoints,
+      center: { x: (minX + maxX) * 0.5, y: (minY + maxY) * 0.5 },
+      width: width + padX * 2,
+      height: height + padY * 2.4,
+    };
+  }
+
+  // Check if a screen bounding box represents the player's own hand
+  isHandDetection(screenRect, rawHands = null) {
+    const hands = rawHands || this.lastHandsResult;
+    if (!hands || !hands.landmarks || hands.landmarks.length === 0) return false;
+
+    const rx1 = screenRect.x;
+    const ry1 = screenRect.y;
+    const rx2 = screenRect.x + screenRect.w;
+    const ry2 = screenRect.y + screenRect.h;
+    const rArea = Math.max(1, screenRect.w * screenRect.h);
+    const rCenterX = screenRect.x + screenRect.w * 0.5;
+    const rCenterY = screenRect.y + screenRect.h * 0.5;
+
+    for (const lms of hands.landmarks) {
+      const bounds = this.getHandScreenBounds(lms);
+      if (!bounds) continue;
+
+      // 1. Detection center inside hand bounds
+      if (
+        rCenterX >= bounds.minX &&
+        rCenterX <= bounds.maxX &&
+        rCenterY >= bounds.minY &&
+        rCenterY <= bounds.maxY
+      ) {
+        return true;
+      }
+
+      // 2. Count how many hand landmarks fall inside the detection box
+      let landmarksInside = 0;
+      for (const sp of bounds.screenPoints) {
+        if (sp.x >= rx1 && sp.x <= rx2 && sp.y >= ry1 && sp.y <= ry2) {
+          landmarksInside++;
+        }
+      }
+      if (landmarksInside >= 2) {
+        return true;
+      }
+
+      // 3. Bounding box intersection area
+      const ix1 = Math.max(rx1, bounds.minX);
+      const iy1 = Math.max(ry1, bounds.minY);
+      const ix2 = Math.min(rx2, bounds.maxX);
+      const iy2 = Math.min(ry2, bounds.maxY);
+
+      if (ix2 > ix1 && iy2 > iy1) {
+        const iArea = (ix2 - ix1) * (iy2 - iy1);
+        if (iArea / rArea > 0.25) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
  
   // Extract pure contour silhouette of the real object without rectangular background box
   captureObjectSnapshot(screenBox) {
@@ -324,7 +410,12 @@ export class VisionPipeline {
     this.lastVideoTime = this.video.currentTime;
  
     try {
-      return this.handLandmarker.detectForVideo(this.video, now);
+      const result = this.handLandmarker.detectForVideo(this.video, now);
+      if (result && result.landmarks && result.landmarks.length > 0) {
+        this.lastHandsResult = result;
+        this.lastHandsTime = now;
+      }
+      return result;
     } catch (e) {
       return null;
     }
@@ -368,6 +459,10 @@ export class VisionPipeline {
           const maxArea = d.heavy ? 0.55 : 0.28;
           const maxH = d.heavy ? 0.85 : 0.65;
           if (area > screenTotalArea * maxArea || rect.h > this.screenHeight * maxH) return false;
+
+          // Reject any detection that is actually the user's hand
+          if (this.isHandDetection(rect)) return false;
+
           return true;
         });
  
@@ -402,7 +497,12 @@ export class VisionPipeline {
  
       // Keep briefly-missed objects so targets don't flicker on a single dropped detection
       for (const p of prevList) {
-        if (!used.has(p.id) && (p.missed || 0) < 2) matched.push({ ...p, missed: (p.missed || 0) + 1 });
+        if (!used.has(p.id) && (p.missed || 0) < 2) {
+          const pRect = this.boxToScreen(p.bbox);
+          if (!this.isHandDetection(pRect)) {
+            matched.push({ ...p, missed: (p.missed || 0) + 1 });
+          }
+        }
       }
  
       this.autoDetections = matched;
