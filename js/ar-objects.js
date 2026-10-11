@@ -34,6 +34,7 @@ export class ARObjectManager {
       lostHandFrames: 0,
       lastValidMuzzle: { ...startMuzzle },
       waitingForHands: heavy,
+      isPulling: false,
     };
  
     return this.latchedTarget;
@@ -54,7 +55,7 @@ export class ARObjectManager {
       handId,
       startMuzzle: { ...startMuzzle },
       curMuzzle: { ...startMuzzle },
-      initialHand: null,
+      pullAnchor: null, // set when the fist closes; pull is measured from here
       tension: 0,
       pullAmount: 0,
     };
@@ -64,35 +65,41 @@ export class ARObjectManager {
     const target = this.latchedTarget;
     if (!target) return null;
  
-    let activeTethers = 0;
+    let presentTethers = 0;
     let totalTension = 0;
+    let tensionCount = 0;
     let primaryMuzzle = null;
-    const pulls = [];
+    const activePulls = [];
  
     for (const [handId, tether] of target.tethers.entries()) {
       const hand = handStates.find((h) => h && h.handId === handId);
-      const pullData = vision.pullDataMap?.get(handId);
-      const touchDriven = !!(pullData && pullData.touch);
+      const pd = vision.pullDataMap?.get(handId);
+      const touchDriven = !!(pd && pd.touch);
  
       if (!hand && !touchDriven) {
         tether.pullAmount = 0;
         tether.tension = 0;
-        pulls.push(0); // a missing hand contributes no pull
         continue;
       }
  
-      activeTethers++;
+      presentTethers++;
       if (hand) tether.curMuzzle = vision.pointToScreen(hand.shooterMuzzle);
       if (!primaryMuzzle) primaryMuzzle = tether.curMuzzle;
  
-      const pd = pullData || { pullAmount: 0, tension: 0 };
-      tether.pullAmount = pd.pullAmount;
-      tether.tension = pd.tension;
-      pulls.push(tether.pullAmount);
-      totalTension += tether.tension;
+      // Movement 4 (pull) only counts while this strand's hand is making a fist (or touch-dragging)
+      if (pd && pd.active) {
+        tether.pullAmount = pd.pullAmount;
+        tether.tension = pd.tension;
+        activePulls.push(pd.pullAmount);
+        totalTension += pd.tension;
+        tensionCount++;
+      } else {
+        tether.pullAmount = 0;
+        tether.tension = 0;
+      }
     }
  
-    if (activeTethers === 0) {
+    if (presentTethers === 0) {
       target.lostHandFrames = (target.lostHandFrames || 0) + 1;
       if (target.lostHandFrames > 40) {
         return { status: 'HAND_LOST', target };
@@ -103,19 +110,22 @@ export class ARObjectManager {
       target.lastValidMuzzle = { ...primaryMuzzle };
     }
  
-    // Light objects: strongest hand wins. Heavy objects: every required hand must pull,
-    // so the effective pull is the WEAKEST strand (and 0 until both strands are attached).
-    let effectivePull;
+    // Light objects: any fist pulling moves it. Heavy objects: EVERY required strand must be
+    // attached AND pulling (both fists), so the effective pull is the weakest strand.
+    // When nobody is pulling the object simply HOLDS where it is.
+    let targetProgress = target.pullProgress;
     if (target.heavy) {
-      const haveAll = target.tethers.size >= target.requiredTethers && pulls.length >= target.requiredTethers;
-      target.waitingForHands = !haveAll || activeTethers < target.requiredTethers;
-      effectivePull = haveAll ? Math.min(...pulls) : 0;
+      const haveAll = target.tethers.size >= target.requiredTethers;
+      const allPulling = haveAll && activePulls.length >= target.requiredTethers;
+      target.waitingForHands = !allPulling;
+      if (allPulling) targetProgress = Math.min(...activePulls);
     } else {
       target.waitingForHands = false;
-      effectivePull = pulls.length ? Math.max(...pulls) : 0;
+      if (activePulls.length) targetProgress = Math.max(...activePulls);
     }
+    target.isPulling = tensionCount > 0 && !target.waitingForHands;
  
-    const targetProgress = Math.max(0, Math.min(1.0, effectivePull));
+    targetProgress = Math.max(0, Math.min(1.0, targetProgress));
     target.pullProgress += (targetProgress - target.pullProgress) * 0.25;
  
     const destX = target.originalCenter.x + (primaryMuzzle.x - target.originalCenter.x) * target.pullProgress * 0.8;
@@ -134,7 +144,9 @@ export class ARObjectManager {
  
     target.currentScale = 1.0 + target.pullProgress * 1.8;
     target.tiltAngle = Math.max(-0.25, Math.min(0.25, target.velocity.x * 0.015));
-    target.lastTension = Math.min(1.0, totalTension / Math.max(1, activeTethers));
+ 
+    const avgTension = tensionCount ? Math.min(1.0, totalTension / tensionCount) : 0;
+    target.lastTension = target.isPulling ? avgTension : target.lastTension * 0.85;
  
     if (target.pullProgress >= 0.85 && !target.isCaught) {
       target.isCaught = true;
@@ -146,7 +158,7 @@ export class ARObjectManager {
       target,
       pullProgress: target.pullProgress,
       tension: target.lastTension,
-      activeTethers,
+      activeTethers: presentTethers,
       waitingForHands: target.waitingForHands,
     };
   }

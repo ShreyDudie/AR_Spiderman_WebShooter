@@ -37,6 +37,7 @@ export class SpideyGame {
     this.lastWhooshTime = 0;
     this.lastShootTime = 0;
     this.lastHeavyHintTime = 0;
+    this.phase = 'IDLE'; // IDLE -> AIM -> FIRE -> LATCH -> REEL
   }
  
   async start() {
@@ -54,7 +55,7 @@ export class SpideyGame {
     this.running = true;
     this.updateStatus('SCANNING OBJECTS', 'ready');
     if (this.ui.gate) this.ui.gate.classList.add('hidden');
-    this.showToast('Spider-Sense active! Flick your wrist DOWN or tap THWIP to shoot web!');
+    this.showToast('Spidey pose to AIM · flick wrist DOWN to SHOOT · FIST + pull to REEL');
  
     if (!this.listenersBound) {
       window.addEventListener('resize', () => this.vision.resizeCanvas());
@@ -88,26 +89,33 @@ export class SpideyGame {
     this.hud.triggerFlash();
   }
  
-  getBestTarget(aimPoint) {
+  // aimPoint: screen point to aim at (defaults to screen centre).
+  // maxRectDist: only lock objects whose box is within this many px of the aim point.
+  getBestTarget(aimPoint, maxRectDist = Infinity) {
     const detections = this.vision.trackedDetections;
     if (!detections || detections.length === 0) return null;
  
     let best = null;
     let minScore = Infinity;
  
-    const refPoint = aimPoint || { x: this.vision.screenWidth * 0.5, y: this.vision.screenHeight * 0.5 };
+    const ref = aimPoint || { x: this.vision.screenWidth * 0.5, y: this.vision.screenHeight * 0.5 };
  
     for (const det of detections) {
       const rect = this.vision.boxToScreen(det.bbox);
+      if (!rect || rect.w <= 0 || rect.h <= 0) continue;
       const center = { x: rect.x + rect.w * 0.5, y: rect.y + rect.h * 0.5 };
  
-      const dist = Math.hypot(refPoint.x - center.x, refPoint.y - center.y);
-      const priorityBonus = det.manual ? -150 : 0;
-      const score = dist + priorityBonus;
+      const dx = Math.max(rect.x - ref.x, 0, ref.x - (rect.x + rect.w));
+      const dy = Math.max(rect.y - ref.y, 0, ref.y - (rect.y + rect.h));
+      const rectDist = Math.hypot(dx, dy);
+      if (rectDist > maxRectDist) continue;
+ 
+      const centerDist = Math.hypot(ref.x - center.x, ref.y - center.y);
+      const score = rectDist * 2 + centerDist + (det.manual ? -150 : 0);
  
       if (score < minScore) {
         minScore = score;
-        best = { detection: det, rect, center, distance: dist };
+        best = { detection: det, rect, center, distance: centerDist };
       }
     }
  
@@ -142,6 +150,7 @@ export class SpideyGame {
     }
   }
  
+  // Movement 4: PULL. Only counts while the hand is a FIST; measured from where the fist closed.
   buildPullMap() {
     const pullMap = new Map();
     const latched = this.arObjects.latchedTarget;
@@ -149,17 +158,29 @@ export class SpideyGame {
  
     for (const [id, tether] of latched.tethers.entries()) {
       const hand = this.handStates.find((h) => h.handId === id);
-      let pull = { pullAmount: 0, tension: 0 };
+      let pull = { pullAmount: 0, tension: 0, active: false };
  
-      if (hand && tether.initialHand) {
+      const fist = hand && (hand.isFist || hand.fistHeld);
+      if (fist) {
         const curMuzzle = this.vision.pointToScreen(hand.shooterMuzzle);
-        pull = this.gestures.calculatePull(
-          tether.initialHand,
+        if (!tether.pullAnchor) {
+          tether.pullAnchor = {
+            hand: { ...hand },
+            muzzle: curMuzzle,
+            base: latched.pullProgress, // continue from wherever the object already is
+          };
+        }
+        const raw = this.gestures.calculatePull(
+          tether.pullAnchor.hand,
           hand,
           curMuzzle,
-          tether.startMuzzle,
+          tether.pullAnchor.muzzle,
           latched.originalCenter
         );
+        const total = Math.min(1, tether.pullAnchor.base + raw.pullAmount);
+        pull = { pullAmount: total, tension: Math.min(1, Math.max(raw.tension, total * 0.5)), active: true };
+      } else {
+        tether.pullAnchor = null; // fist opened: re-anchor next time
       }
  
       // Touch-drag pulling works with or without hands (counts as every strand)
@@ -167,6 +188,7 @@ export class SpideyGame {
         pull = {
           pullAmount: Math.max(pull.pullAmount, this.touchPullAmount),
           tension: Math.max(pull.tension, this.touchPullAmount * 1.2),
+          active: true,
           touch: true,
         };
       }
@@ -175,101 +197,124 @@ export class SpideyGame {
     return pullMap;
   }
  
+  isAimHand(h) {
+    return !!(h && (h.isSpideyPose || h.aimRecently));
+  }
+ 
+  setStep(n) {
+    const steps = this.ui.steps;
+    if (!steps) return;
+    steps.forEach((el, i) => el.classList.toggle('active', i === n - 1));
+  }
+ 
+  setHandText(state, detail, meter) {
+    if (this.ui.handState) this.ui.handState.textContent = state;
+    if (this.ui.handDetail) this.ui.handDetail.textContent = detail;
+    if (this.ui.gestureMeter) this.ui.gestureMeter.style.width = `${meter}%`;
+  }
+ 
   processHandGestures(now) {
     this.updateHandStates(now);
     this.vision.pullDataMap = this.buildPullMap();
  
-    // Open palm = let go
-    if (this.arObjects.latchedTarget) {
-      for (const hand of this.handStates) {
-        if (hand.isOpenPalm) {
-          this.releaseWeb('Wrist released');
-          return;
-        }
-      }
-    }
- 
-    const primaryHand = this.handStates[0];
-    const screenAim = primaryHand
-      ? this.vision.pointToScreen(primaryHand.aimTarget)
-      : { x: this.vision.screenWidth * 0.5, y: this.vision.screenHeight * 0.5 };
- 
-    if (!this.arObjects.latchedTarget) {
-      const target = this.getBestTarget(screenAim);
-      if (target && (!this.lockedTarget || this.lockedTarget.detection.id !== target.detection.id)) {
-        sound.playSpiderSense();
-      }
-      this.lockedTarget = target;
-    } else {
-      this.lockedTarget = null;
-    }
- 
     const latched = this.arObjects.latchedTarget;
-    if (latched) {
-      if (this.ui.handState) this.ui.handState.textContent = 'WEB TETHER LIVE';
-      if (this.ui.handDetail) {
-        this.ui.handDetail.textContent = latched.waitingForHands
-          ? 'HEAVY! BOTH HANDS MUST PULL BACK'
-          : 'PULL WRIST BACK TOWARDS YOU TO REEL';
-      }
-      if (this.ui.gestureMeter) {
-        this.ui.gestureMeter.style.width = `${Math.round(latched.pullProgress * 100)}%`;
-      }
+ 
+    // Deliberate open palm while attached = let go
+    if (latched && this.handStates.some((h) => h.openHeld)) {
+      this.releaseWeb('Web released');
       return;
     }
  
-    if (primaryHand) {
-      const anyReady = this.handStates.some((h) => h.isSpideyPose || h.isFlickDown);
-      if (anyReady) {
-        if (this.ui.handState) this.ui.handState.textContent = 'FIRING POSE ✓';
-        if (this.ui.handDetail) {
-          this.ui.handDetail.textContent = this.lockedTarget
-            ? `LOCKED: ${this.lockedTarget.detection.class.toUpperCase()}${this.lockedTarget.detection.heavy ? ' (HEAVY · 2 HANDS)' : ''}`
-            : 'AIM AT TARGET OBJECT';
+    const aimHands = this.handStates.filter((h) => this.isAimHand(h));
+ 
+    // ---- Work out which of the 4 movements we are in ----
+    let phase;
+    if (latched) phase = latched.pullProgress > 0.05 ? 'REEL' : 'LATCH';
+    else if (this.activeProjectiles.size > 0) phase = 'FIRE';
+    else if (aimHands.length > 0) phase = 'AIM';
+    else phase = 'IDLE';
+    this.phase = phase;
+    this.setStep({ IDLE: 1, AIM: 2, FIRE: 3, LATCH: 4, REEL: 4 }[phase]);
+ 
+    // ---- Target locking (only while aiming) ----
+    if (phase === 'AIM') {
+      const lead = aimHands.find((h) => h.isSpideyPose) || aimHands[0];
+      // freeze the lock while the wrist is flicking so the shot can't slide to another object
+      if (lead.isSpideyPose && lead.flickSpeed < 1.5) {
+        const aim = this.vision.pointToScreen(lead.aimTarget);
+        const target = this.getBestTarget(aim, 90);
+        if (target && (!this.lockedTarget || this.lockedTarget.detection.id !== target.detection.id)) {
+          sound.playSpiderSense();
         }
-        if (this.ui.gestureMeter) this.ui.gestureMeter.style.width = '100%';
-      } else {
-        const j = primaryHand.jointStates || {};
-        let stateHint = 'FLICK WRIST DOWN OR MAKE SPIDEY POSE';
-        if (!j.indexExtended) stateHint = 'FLICK WRIST DOWN / EXTEND INDEX';
-        else if (!j.pinkyExtended) stateHint = 'EXTEND PINKY FINGER';
-        else if (!j.middleCurled || !j.ringCurled) stateHint = 'CURL MIDDLE & RING';
- 
-        if (this.ui.handState) this.ui.handState.textContent = 'BIO-JOINTS SCANNING';
-        if (this.ui.handDetail) this.ui.handDetail.textContent = stateHint;
-        if (this.ui.gestureMeter) this.ui.gestureMeter.style.width = '45%';
+        this.lockedTarget = target;
       }
- 
-      this.tryGestureShoot(now);
-    } else {
-      if (this.ui.handState) this.ui.handState.textContent = this.lockedTarget ? 'TARGET LOCKED' : 'SEARCHING';
-      if (this.ui.handDetail) this.ui.handDetail.textContent = this.lockedTarget ? 'TAP THWIP TO SHOOT' : 'SHOW HAND TO CAMERA';
-      if (this.ui.gestureMeter) this.ui.gestureMeter.style.width = '10%';
+    } else if (phase === 'IDLE' || latched) {
+      this.lockedTarget = null;
     }
+ 
+    // ---- HUD text per movement ----
+    if (phase === 'REEL' || phase === 'LATCH') {
+      const anyFist = this.handStates.some((h) => h.isFist || h.fistHeld);
+      let detail;
+      if (latched.heavy && latched.tethers.size < latched.requiredTethers) detail = 'SECOND WEB INCOMING…';
+      else if (latched.heavy) detail = anyFist ? 'HEAVY! BOTH HANDS: FIST + PULL BACK' : 'HEAVY! MAKE A FIST WITH BOTH HANDS';
+      else detail = anyFist ? 'PULLING… KEEP PULLING BACK' : 'MAKE A FIST & PULL BACK TO REEL';
+      this.setHandText('4 · PULL', detail, Math.round(latched.pullProgress * 100));
+      return;
+    }
+ 
+    if (phase === 'FIRE') {
+      this.setHandText('3 · SHOOT', 'WEB IN FLIGHT…', 100);
+      return;
+    }
+ 
+    if (phase === 'AIM') {
+      const t = this.lockedTarget;
+      if (t) {
+        const need2 = t.detection.heavy && aimHands.length < 2;
+        this.setHandText(
+          '2 · AIM LOCKED',
+          need2
+            ? `${t.detection.class.toUpperCase()} IS HEAVY — AIM WITH BOTH HANDS`
+            : `${t.detection.class.toUpperCase()} · FLICK WRIST DOWN TO SHOOT`,
+          75
+        );
+      } else {
+        this.setHandText('2 · AIMING', 'MOVE CROSSHAIR ONTO AN OBJECT', 40);
+      }
+      this.tryGestureShoot(now, aimHands);
+      return;
+    }
+ 
+    // IDLE: hands may be visible, but nothing happens
+    this.setHandText(
+      '1 · IDLE',
+      this.handStates.length ? 'MAKE SPIDEY POSE (☝ + 🤙) TO AIM' : 'SHOW HAND TO CAMERA',
+      10
+    );
   }
  
-  // Single-shot trigger: wrist flick DOWN or a confirmed Spidey pose
-  tryGestureShoot(now) {
+  // Movement 3: from the AIM pose, a quick wrist flick DOWN fires the web at the locked target
+  tryGestureShoot(now, aimHands) {
     const target = this.lockedTarget;
     if (!target || this.arObjects.latchedTarget) return;
     if (now - this.lastShootTime < SHOOT_COOLDOWN_MS) return;
- 
-    const ready = this.handStates.filter((h) => h.isSpideyPose || h.isFlickDown);
-    if (ready.length === 0) return;
+    if (!aimHands.some((h) => h.isFlickDown)) return;
  
     if (target.detection.heavy) {
-      if (ready.length < 2) {
+      if (aimHands.length < 2) {
         if (now - this.lastHeavyHintTime > 2500) {
           this.lastHeavyHintTime = now;
-          this.showToast('Heavy object! Show BOTH hands and shoot with both.');
+          this.showToast('Heavy object! Aim with BOTH hands, then flick.');
         }
         return;
       }
       this.lastShootTime = now;
-      this.tryShootWeb(ready.slice(0, 2), target);
+      this.tryShootWeb(aimHands.slice(0, 2), target);
     } else {
+      const shooter = aimHands.find((h) => h.isFlickDown) || aimHands[0];
       this.lastShootTime = now;
-      this.tryShootWeb([ready[0]], target);
+      this.tryShootWeb([shooter], target);
     }
   }
  
@@ -280,7 +325,7 @@ export class SpideyGame {
       return;
     }
  
-    const target = this.lockedTarget || this.getBestTarget();
+    const target = this.lockedTarget || this.getBestTarget(null, Infinity);
     if (!target) {
       this.showToast('Aim camera at an object first!');
       return;
@@ -347,17 +392,14 @@ export class SpideyGame {
             this.arObjects.addTether({ handId, startMuzzle: screenMuzzle });
           }
  
-          const tether = latched.tethers.get(handId);
-          if (tether && hand) tether.initialHand = { ...hand };
- 
           if (latched.heavy && latched.tethers.size < latched.requiredTethers) {
             this.showToast('First web attached — second strand incoming!');
           } else if (latched.heavy) {
-            this.showToast(`Both webs on ${target.detection.class} — pull BOTH wrists back!`);
-            this.updateStatus('BOTH HANDS: PULL BACK', 'tracking');
+            this.showToast(`Both webs stuck to ${target.detection.class} — FIST + pull BOTH hands back!`);
+            this.updateStatus('BOTH HANDS: FIST + PULL', 'tracking');
           } else {
-            this.showToast(`Web attached to ${target.detection.class} — pull wrist BACK to reel!`);
-            this.updateStatus('PULL WRIST BACK TO REEL', 'tracking');
+            this.showToast(`Web stuck to ${target.detection.class} — make a FIST and pull back!`);
+            this.updateStatus('FIST + PULL BACK TO REEL', 'tracking');
           }
         },
       });
@@ -436,7 +478,8 @@ export class SpideyGame {
       this.vision.trackedDetections,
       this.vision,
       latched?.id,
-      this.lockedTarget
+      this.lockedTarget,
+      this.phase
     );
  
     // 2. Draw latched object cutout and its web tethers
@@ -454,9 +497,11 @@ export class SpideyGame {
  
     // 3. Draw wrist web-shooter & biometric skeleton
     this.hud.drawHandSkeleton(this.ctx, this.handStates, this.vision, now);
-    for (const hand of this.handStates) {
-      const screenMuzzle = this.vision.pointToScreen(hand.shooterMuzzle);
-      this.web.drawWristShooter(this.ctx, screenMuzzle, hand.isSpideyPose || hand.isFlickDown, now);
+    if (this.phase !== 'IDLE') {
+      for (const hand of this.handStates) {
+        const screenMuzzle = this.vision.pointToScreen(hand.shooterMuzzle);
+        this.web.drawWristShooter(this.ctx, screenMuzzle, this.isAimHand(hand), now);
+      }
     }
  
     // 4. Update and render web projectiles & impact visual effects
@@ -470,7 +515,8 @@ export class SpideyGame {
       this.vision,
       latched,
       this.lockedTarget,
-      now
+      now,
+      this.phase
     );
  
     // 6. Draw manual drag selection if active
@@ -547,7 +593,7 @@ export class SpideyGame {
  
         if (w >= 28 && h >= 28) {
           this.vision.addManualTarget({ x, y, w, h });
-          this.showToast('Custom target locked! Flick wrist or tap THWIP!');
+          this.showToast('Custom target added! Aim at it with Spidey pose.');
         }
       }
  

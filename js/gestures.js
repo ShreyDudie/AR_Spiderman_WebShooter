@@ -98,6 +98,9 @@ export class GestureAnalyzer {
         velY: 0,
         flickUntil: 0,
         lastFlickAt: -Infinity,
+        lastAimAt: -Infinity,
+        lastFistAt: -Infinity,
+        openSince: null,
       };
       this.history.set(handId, hist);
     }
@@ -109,6 +112,19 @@ export class GestureAnalyzer {
     const isSpideyConfirmed = hist.spideyStreak >= 3;
     const isOpenConfirmed = hist.openStreak >= 2;
     const isFistConfirmed = hist.fistStreak >= 2;
+ 
+    // Timers used by the 4-movement state machine
+    if (isSpideyConfirmed) hist.lastAimAt = now;
+    if (isFistConfirmed) hist.lastFistAt = now;
+    if (isOpenConfirmed) {
+      if (hist.openSince == null) hist.openSince = now;
+    } else {
+      hist.openSince = null;
+    }
+    const aimRecently = now - hist.lastAimAt < 450;   // aim pose held a moment ago (survives the flick)
+    const fistHeld = now - hist.lastFistAt < 250;     // fist, with a short grace for tracking dropouts
+    const openHeld = hist.openSince != null && now - hist.openSince > 450; // deliberate open palm
+    const pose = isSpideyConfirmed ? 'AIM' : isFistConfirmed ? 'FIST' : isOpenConfirmed ? 'OPEN' : 'IDLE';
  
     hist.smoothWrist.x += (wrist.x - hist.smoothWrist.x) * 0.35;
     hist.smoothWrist.y += (wrist.y - hist.smoothWrist.y) * 0.35;
@@ -164,6 +180,10 @@ export class GestureAnalyzer {
       isFist: isFistConfirmed,
       isFlickDown,
       flickSpeed: hist.velY,
+      pose,
+      aimRecently,
+      fistHeld,
+      openHeld,
       jointStates: {
         indexExtended: isIndexExtended,
         pinkyExtended: isPinkyExtended,

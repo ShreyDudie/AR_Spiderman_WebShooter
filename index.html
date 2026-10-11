@@ -48,7 +48,7 @@
     }
     .topbar {
       display: flex; align-items: flex-start; justify-content: space-between;
-      padding: max(16px, env(safe-area-inset-top)) 16px 0; pointer-events: auto;
+      padding: max(16px, env(safe-area-inset-top)) 16px 0; pointer-events: none;
     }
     .brand { display: flex; gap: 10px; align-items: center; }
     .brand-mark {
@@ -65,6 +65,7 @@
       padding: 0 13px; border: 1px solid var(--panel-border); border-radius: 99px;
       background: var(--panel); color: #d8e8f4; font-size: 10px; letter-spacing: 0.1em;
       backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      pointer-events: auto;
     }
     .status-dot {
       width: 8px; height: 8px; border-radius: 50%;
@@ -76,18 +77,19 @@
 
     .readout {
       position: absolute; top: max(72px, calc(env(safe-area-inset-top) + 60px)); left: 16px;
-      display: grid; gap: 8px; width: min(240px, calc(100vw - 32px)); pointer-events: auto;
+      display: grid; gap: 8px; width: min(260px, calc(100vw - 32px)); pointer-events: none;
     }
     .readout-card {
       padding: 12px 14px; border: 1px solid var(--panel-border); border-radius: 14px;
       background: var(--panel); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      pointer-events: auto;
     }
     .eyebrow { color: var(--cyan); font-size: 9px; font-weight: 800; letter-spacing: 0.18em; }
     .readout-main {
-      display: flex; align-items: baseline; justify-content: space-between;
+      display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
       margin-top: 6px; font-size: 12px;
     }
-    .readout-main span:last-child { color: var(--muted); font-size: 10px; }
+    .readout-main span:last-child { color: var(--muted); font-size: 10px; text-align: right; }
     .meter {
       height: 4px; margin-top: 8px; overflow: hidden; border-radius: 4px;
       background: rgba(255, 255, 255, 0.12);
@@ -98,20 +100,35 @@
       transition: width 0.1s linear;
     }
 
+    /* 4-movement step tracker */
+    .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin-top: 10px; }
+    .step {
+      padding: 6px 2px 5px; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 9px;
+      text-align: center; opacity: 0.5; transition: opacity 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    }
+    .step b { display: block; font-size: 12px; line-height: 1; }
+    .step small { display: block; margin-top: 3px; font-size: 7.5px; letter-spacing: 0.08em; color: var(--muted); }
+    .step.active {
+      opacity: 1; border-color: rgba(213, 255, 133, 0.75);
+      background: rgba(213, 255, 133, 0.12); box-shadow: 0 0 14px rgba(213, 255, 133, 0.2);
+    }
+    .step.active small { color: var(--lime); }
+
     .bottom {
       padding: 0 16px max(16px, env(safe-area-inset-bottom));
       display: flex; align-items: flex-end; justify-content: space-between; gap: 12px;
-      pointer-events: auto;
+      pointer-events: none;
     }
     .hint {
       max-width: min(480px, 68vw); padding: 12px 14px; border: 1px solid var(--panel-border);
       border-radius: 14px; background: var(--panel); color: #d0e0ed; font-size: 11px;
       line-height: 1.45; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      pointer-events: auto;
     }
     .hint strong { color: #ffffff; display: block; margin-bottom: 3px; }
     .hint small { display: block; color: var(--muted); font-size: 9.5px; }
 
-    .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; pointer-events: auto; }
     button {
       min-height: 42px; padding: 0 13px; border: 1px solid var(--panel-border);
       border-radius: 12px; background: rgba(10, 24, 38, 0.88); color: var(--ink);
@@ -172,7 +189,7 @@
     .gate {
       position: fixed; inset: 0; z-index: 20; display: grid; place-items: center;
       padding: 20px; background: rgba(3, 7, 14, 0.88); backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px); pointer-events: auto;
+      -webkit-backdrop-filter: blur(20px); pointer-events: auto; overflow-y: auto;
       transition: opacity 0.35s ease, visibility 0.35s ease;
     }
     .gate.hidden { visibility: hidden; opacity: 0; pointer-events: none; }
@@ -188,14 +205,21 @@
       -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     }
     .gate-card p { color: #adc0d0; font-size: 13px; line-height: 1.6; margin-bottom: 14px; }
-    .pose-guide {
-      display: flex; gap: 12px; align-items: center; padding: 12px 14px;
-      margin: 14px 0; border: 1px solid rgba(213, 255, 133, 0.35); border-radius: 14px;
-      background: rgba(213, 255, 133, 0.07);
+    .move-list { display: grid; gap: 8px; margin: 14px 0; }
+    .move {
+      display: flex; gap: 12px; align-items: center; padding: 10px 12px;
+      border: 1px solid rgba(213, 255, 133, 0.3); border-radius: 14px;
+      background: rgba(213, 255, 133, 0.06);
     }
-    .pose-icon { font-size: 28px; line-height: 1; }
-    .pose-info strong { display: block; font-size: 11.5px; color: var(--lime); letter-spacing: 0.08em; }
-    .pose-info span { display: block; font-size: 10px; color: #bed2e4; margin-top: 2px; }
+    .move-num {
+      display: grid; place-items: center; flex: none; width: 26px; height: 26px; border-radius: 50%;
+      background: rgba(213, 255, 133, 0.18); color: var(--lime); font-size: 12px; font-weight: 900;
+    }
+    .move-icon { font-size: 24px; line-height: 1; flex: none; }
+    .move-info strong { display: block; font-size: 11px; color: var(--lime); letter-spacing: 0.08em; }
+    .move-info span { display: block; font-size: 10px; color: #bed2e4; margin-top: 2px; line-height: 1.4; }
+    .move.heavy { border-color: rgba(102, 246, 255, 0.35); background: rgba(102, 246, 255, 0.07); }
+    .move.heavy .move-info strong { color: var(--cyan); }
 
     .startup-error { color: #ff8597 !important; font-size: 11.5px !important; margin-top: 8px; }
     .gate-card .primary { width: 100%; min-height: 50px; margin-top: 10px; font-size: 11.5px; }
@@ -233,10 +257,16 @@
       <div class="readout-card">
         <div class="eyebrow">SPIDER-SENSE / HANDS</div>
         <div class="readout-main">
-          <strong id="hand-state">SEARCHING</strong>
-          <span id="hand-detail">SHOW HANDS TO CAMERA</span>
+          <strong id="hand-state">1 · IDLE</strong>
+          <span id="hand-detail">SHOW HAND TO CAMERA</span>
         </div>
         <div class="meter"><i id="gesture-meter"></i></div>
+        <div class="steps" aria-label="Hand movement steps">
+          <div class="step active"><b>🖐</b><small>1 IDLE</small></div>
+          <div class="step"><b>🤟</b><small>2 AIM</small></div>
+          <div class="step"><b>🕸️</b><small>3 SHOOT</small></div>
+          <div class="step"><b>✊</b><small>4 PULL</small></div>
+        </div>
       </div>
       <div class="readout-card">
         <div class="eyebrow">REAL OBJECT RADAR</div>
@@ -257,8 +287,8 @@
 
     <footer class="bottom">
       <div class="hint" id="hint">
-        <strong>🕸️ FLICK WRIST DOWN to shoot web · PULL WRIST BACK to reel in!</strong>
-        <small>Target auto-locks on any small object. Flick wrist down (or hold Spidey pose / tap screen) to shoot. Pull wrist back to haul the object in!</small>
+        <strong>🖐 IDLE · 🤟 AIM · 🕸️ FLICK DOWN to shoot · ✊ FIST + PULL BACK to reel</strong>
+        <small>Nothing happens until you make the Spidey pose (index + pinky up). Crosshair snaps onto an object, flick your wrist down to shoot, then make a fist and pull back. Hold an open palm to let go.</small>
       </div>
       <div class="controls">
         <button id="cam-toggle">🔄 FLIP CAM</button>
@@ -272,21 +302,28 @@
     <div class="gate-card">
       <div class="eyebrow">AUGMENTED REALITY // MOBILE FIELD TEST</div>
       <h1>SUIT UP, SPIDEY.</h1>
-      <p>Scan real-world objects with your phone camera. Aim your crosshair at any item, flick your wrist DOWN to shoot your web, and pull your wrist BACK to reel it in!</p>
+      <p>Four hand movements. Nothing fires by accident.</p>
 
-      <div class="pose-guide">
-        <div class="pose-icon">🕸️</div>
-        <div class="pose-info">
-          <strong>WRIST DOWN TO SHOOT // WRIST BACK TO REEL</strong>
-          <span>Flick your wrist DOWN to fire web (or make Spidey pose / tap screen). Once attached, pull your wrist BACK to reel the object in! Open palm to release.</span>
+      <div class="move-list">
+        <div class="move">
+          <div class="move-num">1</div><div class="move-icon">🖐</div>
+          <div class="move-info"><strong>IDLE</strong><span>Any normal hand. The game does nothing — no aiming, no shooting.</span></div>
         </div>
-      </div>
-
-      <div class="pose-guide" style="border-color: rgba(102, 246, 255, 0.35); background: rgba(102, 246, 255, 0.07);">
-        <div class="pose-icon">🙌</div>
-        <div class="pose-info">
-          <strong style="color: var(--cyan);">HEAVY OBJECT 2-HAND PULL</strong>
-          <span>Chairs, laptops, bags & large boxes require BOTH hands to latch and reel!</span>
+        <div class="move">
+          <div class="move-num">2</div><div class="move-icon">🤟</div>
+          <div class="move-info"><strong>AIM</strong><span>Index + pinky up, middle + ring curled. A crosshair with guide lines follows your fingertip and locks onto objects.</span></div>
+        </div>
+        <div class="move">
+          <div class="move-num">3</div><div class="move-icon">🕸️</div>
+          <div class="move-info"><strong>SHOOT</strong><span>While locked, flick your wrist DOWN. The web fires and sticks to the object.</span></div>
+        </div>
+        <div class="move">
+          <div class="move-num">4</div><div class="move-icon">✊</div>
+          <div class="move-info"><strong>PULL</strong><span>Make a fist and pull it back toward you to reel the object closer. Hold an open palm to let go.</span></div>
+        </div>
+        <div class="move heavy">
+          <div class="move-num">+</div><div class="move-icon">🙌</div>
+          <div class="move-info"><strong>HEAVY OBJECTS</strong><span>Chairs, laptops, bags: aim and shoot with BOTH hands, then pull with BOTH fists.</span></div>
         </div>
       </div>
 
@@ -315,6 +352,7 @@
       objectCount: document.querySelector('#object-count'),
       toast: document.querySelector('#toast'),
       caughtBanner: document.querySelector('#caught'),
+      steps: Array.from(document.querySelectorAll('.step')),
       gate,
       startButton,
     };
