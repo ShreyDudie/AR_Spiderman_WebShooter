@@ -219,7 +219,7 @@ export class SpiderHUD {
       ctx.stroke();
  
       ctx.shadowBlur = 0;
-      const tag = candidateTarget.detection.heavy ? ' · 2 HANDS' : '';
+      const tag = '';
       const text = `TARGET LOCKED // ${candidateTarget.detection.class.toUpperCase()}${tag}`;
       ctx.font = '700 10.5px Inter, monospace';
       const tw = ctx.measureText(text).width;
@@ -281,7 +281,7 @@ export class SpiderHUD {
       });
  
       ctx.shadowBlur = 0;
-      const label = `${det.class.toUpperCase()}${det.heavy ? ' · 2 HANDS' : ''}${isAimCandidate ? ' · LOCKED' : ''}`;
+      const label = `${det.class.toUpperCase()}${isAimCandidate ? ' · LOCKED' : ''}`;
       ctx.font = '700 10px Inter, sans-serif';
       const tw = ctx.measureText(label).width;
       ctx.fillStyle = isAimCandidate ? 'rgba(15, 35, 20, 0.92)' : 'rgba(4, 14, 25, 0.85)';

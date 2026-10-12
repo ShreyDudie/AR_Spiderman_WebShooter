@@ -412,9 +412,7 @@ export class SpideyGame {
     if (phase === 'REEL' || phase === 'LATCH') {
       const anyFist = this.handStates.some((h) => h.isFist || h.fistHeld);
       let detail;
-      if (latched.heavy && latched.tethers.size < latched.requiredTethers) detail = 'SECOND WEB INCOMING…';
-      else if (latched.heavy) detail = anyFist ? 'HEAVY! BOTH HANDS: FIST + PULL BACK' : 'HEAVY! MAKE A FIST WITH BOTH HANDS';
-      else detail = anyFist ? 'PULLING… KEEP PULLING BACK' : 'MAKE A FIST & PULL BACK TO REEL';
+      detail = anyFist ? 'PULLING… KEEP PULLING BACK' : 'MAKE A FIST & PULL BACK TO REEL';
       this.setHandText('4 · PULL', detail, Math.round(latched.pullProgress * 100));
       return;
     }
@@ -427,12 +425,9 @@ export class SpideyGame {
     if (phase === 'AIM') {
       const t = this.lockedTarget;
       if (t) {
-        const need2 = t.detection.heavy && aimHands.length < 2;
         this.setHandText(
           '2 · AIM LOCKED',
-          need2
-            ? `${t.detection.class.toUpperCase()} IS HEAVY — AIM WITH BOTH HANDS`
-            : `${t.detection.class.toUpperCase()} · FLICK WRIST TO SHOOT`,
+          `${t.detection.class.toUpperCase()} · FLICK WRIST TO SHOOT`,
           Math.round(20 + 80 * Math.max(...aimHands.map((h) => h.flickProgress || 0)))
         );
       } else {
@@ -486,21 +481,8 @@ export class SpideyGame {
     }
     if (!target) return;
  
-    if (target.detection.heavy) {
-      if (aimHands.length < 2) {
-        if (now - this.lastHeavyHintTime > 2500) {
-          this.lastHeavyHintTime = now;
-          this.showToast('Heavy object! Aim with BOTH hands, then flick.');
-        }
-        return;
-      }
-      this.lastShootTime = now;
-      this.tryShootWeb(aimHands.slice(0, 2), target);
-    } else {
-      const shooter = aimHands.find((h) => h.isFlickDown) || aimHands[0];
-      this.lastShootTime = now;
-      this.tryShootWeb([shooter], target);
-    }
+    this.lastShootTime = now;
+    this.tryShootWeb([flickHand], target);
   }
  
   // THWIP button / screen tap
@@ -516,15 +498,7 @@ export class SpideyGame {
       return;
     }
  
-    if (target.detection.heavy) {
-      if (this.handStates.length < 2) {
-        this.showToast('Heavy object! Show BOTH hands to the camera, then tap THWIP.');
-        return;
-      }
-      this.tryShootWeb(this.handStates.slice(0, 2), target);
-    } else {
-      this.tryShootWeb(this.handStates.length ? [this.handStates[0]] : [], target);
-    }
+    this.tryShootWeb(this.handStates.length ? [this.handStates[0]] : [], target);
   }
  
   // hands: array of analysed hand states (empty array = fire from the bottom of the screen)
@@ -542,9 +516,7 @@ export class SpideyGame {
         ? this.vision.pointToScreen(hand.shooterMuzzle)
         : { x: this.vision.screenWidth * 0.5, y: this.vision.screenHeight * 0.9 };
  
-      // Fan two strands slightly apart so heavy shots read as two webs
-      const spread = shooters.length > 1 ? (idx === 0 ? -10 : 10) : 0;
-      const targetPoint = { x: target.center.x + spread, y: target.center.y };
+      const targetPoint = { x: target.center.x, y: target.center.y };
  
       this.activeProjectiles.add(handId);
       sound.playThwip(1.0);
@@ -578,15 +550,8 @@ export class SpideyGame {
             this.arObjects.addTether({ handId, startMuzzle: screenMuzzle });
           }
  
-          if (latched.heavy && latched.tethers.size < latched.requiredTethers) {
-            this.showToast('First web attached — second strand incoming!');
-          } else if (latched.heavy) {
-            this.showToast(`Both webs stuck to ${target.detection.class} — FIST + pull BOTH hands back!`);
-            this.updateStatus('BOTH HANDS: FIST + PULL', 'tracking');
-          } else {
-            this.showToast(`Web stuck to ${target.detection.class} — make a FIST and pull back!`);
-            this.updateStatus('FIST + PULL BACK TO REEL', 'tracking');
-          }
+          this.showToast(`Web stuck to ${target.detection.class} — make a FIST and pull back!`);
+          this.updateStatus('FIST + PULL BACK TO REEL', 'tracking');
         },
       });
     });

@@ -1,5 +1,5 @@
 // Camera Stream & MediaPipe Vision Pipeline
-// Filters for graspable real-world objects (small = one hand, heavy = two hands) and extracts cutouts
+// Filters for graspable real-world objects (small and heavy objects are both pulled with one hand) and extracts cutouts
  
 const ALLOWED_SMALL_OBJECTS = new Set([
   'bottle', 'cup', 'wine glass', 'mug', 'bowl',

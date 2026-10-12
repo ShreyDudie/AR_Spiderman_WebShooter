@@ -1,6 +1,6 @@
 // Augmented Reality Pure Object Cutout & Reeling Physics
 // Brings ONLY the visual cutout of the real object closer with realistic 3D depth (NO bounding boxes!)
-// Heavy objects (chairs, laptops, bags...) need TWO web tethers, and BOTH hands must pull.
+// Every object (heavy or not) is reeled in with a single hand / single web tether.
  
 const CATCH_PROGRESS = 0.85;   // pull progress at which the object counts as reeled in
 const COLLECT_MS = 420;        // length of the "zip into the hand" collection animation
@@ -24,7 +24,7 @@ export class ARObjectManager {
       id: detection.id || `target_${Date.now()}`,
       detection,
       heavy,
-      requiredTethers: heavy ? 2 : 1,
+      requiredTethers: 1,
       screenBox: { ...screenBox },
       originalCenter: { ...center },
       renderPos: { ...center },
@@ -43,7 +43,7 @@ export class ARObjectManager {
       alpha: 1,
       caughtAt: 0,
       collectFrom: null,
-      waitingForHands: heavy,
+      waitingForHands: false,
       isPulling: false,
       lastPullTime: performance.now(),
     };
@@ -168,15 +168,8 @@ export class ARObjectManager {
     // attached AND pulling (both fists), so the effective pull is the weakest strand.
     // When nobody is pulling the object simply HOLDS where it is.
     let targetProgress = target.pullProgress;
-    if (target.heavy) {
-      const haveAll = target.tethers.size >= target.requiredTethers;
-      const allPulling = haveAll && activePulls.length >= target.requiredTethers;
-      target.waitingForHands = !allPulling;
-      if (allPulling) targetProgress = Math.min(...activePulls);
-    } else {
-      target.waitingForHands = false;
-      if (activePulls.length) targetProgress = Math.max(...activePulls);
-    }
+    target.waitingForHands = false;
+    if (activePulls.length) targetProgress = Math.max(...activePulls);
     target.isPulling = tensionCount > 0 && !target.waitingForHands;
  
     if (activePulls.length > 0 && tensionCount > 0) {
