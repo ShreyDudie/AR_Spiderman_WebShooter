@@ -3,13 +3,14 @@
  
 // Flick = a SMALL, quick downward movement of the wrist, palm OR fingertip.
 // FLICK_SENSITIVITY is the one knob to tune: 1.0 = default, 1.5 = more sensitive, 0.7 = stricter.
-const FLICK_SENSITIVITY = 1.6;
-const FLICK_NEED = { wrist: 0.20, palm: 0.16, tip: 0.20 }; // downward travel in palm-lengths (before sensitivity)
-const FLICK_TIP_SPEED = 1.2;   // fingertip downward speed in palm-lengths/second (before sensitivity)
-const FLICK_MIN_SPEED = 1.0;   // slower drifts (e.g. just moving your hand down to aim) never count; palm-lengths/second, before sensitivity
-const FLICK_TRAIL_MS = 360;    // how far back we look for the start of the movement
-const FLICK_WINDOW_MS = 350;   // how long a detected flick stays "active" (the game polls every frame)
-const FLICK_COOLDOWN_MS = 350; // minimum time between two flicks of the same hand
+const FLICK_SENSITIVITY = 2.1;
+const FLICK_NEED = { wrist: 0.16, palm: 0.13, tip: 0.16 }; // downward travel in palm-lengths (before sensitivity)
+const FLICK_TIP_SPEED = 1.0;   // fingertip downward speed in palm-lengths/second (before sensitivity)
+const FLICK_MIN_SPEED = 0.75;  // slower drifts (e.g. just moving your hand down to aim) never count; palm-lengths/second, before sensitivity
+const FLICK_SIDE_RATIO = 0.55; // how much sideways drift is tolerated relative to the downward drop (lower = more lenient)
+const FLICK_TRAIL_MS = 420;    // how far back we look for the start of the movement
+const FLICK_WINDOW_MS = 380;   // how long a detected flick stays "active" (the game polls every frame)
+const FLICK_COOLDOWN_MS = 300; // minimum time between two flicks of the same hand
 
 // ---- Grip (fist) / release tuning ----
 // "Openness" = mean distance of the 4 fingertips from the palm centre, in palm-lengths.
@@ -63,7 +64,7 @@ export class GestureAnalyzer {
       y: (wrist.y + middleMCP.y) * 0.5,
       z: ((wrist.z || 0) + (middleMCP.z || 0)) * 0.5,
     };
-    const palmScale = Math.max(0.04, dist3D(wrist, middleMCP));
+    const palmScale = Math.max(0.012, dist3D(wrist, middleMCP));
  
     // Joint angles for each finger
     const indexAnglePIP = jointAngle(indexMCP, indexPIP, indexDIP);
@@ -127,6 +128,7 @@ export class GestureAnalyzer {
         fistStreak: 0,
         smoothWrist: { x: wrist.x, y: wrist.y, z: wrist.z || 0 },
         smoothAim: { x: indexTip.x, y: indexTip.y },
+        smoothBase: { x: indexMCP.x, y: indexMCP.y },
         smoothMuzzle: { x: wrist.x, y: wrist.y },
         smoothPalmScale: palmScale,
         prevMuzzle: { x: wrist.x, y: wrist.y },
@@ -208,6 +210,8 @@ export class GestureAnalyzer {
  
     hist.smoothAim.x += (indexTip.x - hist.smoothAim.x) * 0.4;
     hist.smoothAim.y += (indexTip.y - hist.smoothAim.y) * 0.4;
+    hist.smoothBase.x += (indexMCP.x - hist.smoothBase.x) * 0.4;
+    hist.smoothBase.y += (indexMCP.y - hist.smoothBase.y) * 0.4;
  
     // ---- Flick detection: small downward motion of wrist, palm centre or fingertip ----
     // A gentle wrist flick often moves the fingertips far more than the wrist, so all three
@@ -246,20 +250,26 @@ export class GestureAnalyzer {
       const drop = (cur[k].y - top.y) / scale;
       const side = Math.abs(cur[k].x - top.x) / scale;
       const dropSpeed = drop / Math.max(0.03, (now - topT) / 1000);
-      if (drop > side * 0.8 && dropSpeed >= FLICK_MIN_SPEED / FLICK_SENSITIVITY) {
+      if (drop > side * FLICK_SIDE_RATIO && dropSpeed >= FLICK_MIN_SPEED / FLICK_SENSITIVITY) {
         flickProgress = Math.max(flickProgress, drop / (FLICK_NEED[k] / FLICK_SENSITIVITY));
       }
     }
- 
+
     // fast fingertip drop also counts (very short, snappy flicks)
     const first = hist.trail[0];
     const spanS = (now - first.t) / 1000;
-    if (spanS > 0.04) {
+    if (spanS > 0.03) {
       const tipSpeed = (cur.tip.y - first.tip.y) / spanS / scale;
       const tipSide = Math.abs(cur.tip.x - first.tip.x) / spanS / scale;
-      if (tipSpeed > tipSide * 0.8) {
+      if (tipSpeed > tipSide * FLICK_SIDE_RATIO) {
         flickProgress = Math.max(flickProgress, tipSpeed / (FLICK_TIP_SPEED / FLICK_SENSITIVITY));
       }
+    }
+
+    // instantaneous downward wrist velocity (already smoothed each frame) — catches flicks whose
+    // trail got reset by a brief tracking hiccup, so a real flick never silently gets dropped.
+    if (hist.velY > FLICK_MIN_SPEED / FLICK_SENSITIVITY && Math.abs(hist.velX) < hist.velY * 1.1) {
+      flickProgress = Math.max(flickProgress, hist.velY / (FLICK_TIP_SPEED / FLICK_SENSITIVITY));
     }
  
     if (flickProgress >= 1 && now - hist.lastFlickAt > FLICK_COOLDOWN_MS) {
@@ -277,6 +287,7 @@ export class GestureAnalyzer {
       wrist: { ...hist.smoothWrist },
       shooterMuzzle: { x: hist.smoothMuzzle.x, y: hist.smoothMuzzle.y, z: hist.smoothWrist.z },
       aimTarget: { x: hist.smoothAim.x, y: hist.smoothAim.y, z: 0 },
+      aimBase: { x: hist.smoothBase.x, y: hist.smoothBase.y },
       palmCenter,
       palmScale: hist.smoothPalmScale,
       isSpideyPose: isSpideyConfirmed,
@@ -306,34 +317,36 @@ export class GestureAnalyzer {
       },
     };
   }
- 
+
   // Pull = wrist moving BACK toward the player (away from the object) or the hand growing in view.
-  calculatePull(anchor, currentHand, screenMuzzle, anchorMuzzle, objectCenter) {
+  calculatePull(anchor, currentHand, screenMuzzle, anchorMuzzle, objectCenter, screenW = 400) {
     if (!anchor || !currentHand) return { pullAmount: 0, tension: 0 };
- 
+
     const toHandX = anchorMuzzle.x - objectCenter.x;
     const toHandY = anchorMuzzle.y - objectCenter.y;
     const len = Math.hypot(toHandX, toHandY) || 1;
     const dirX = toHandX / len;
     const dirY = toHandY / len;
- 
+
     const moveX = screenMuzzle.x - anchorMuzzle.x;
     const moveY = screenMuzzle.y - anchorMuzzle.y;
- 
+
     // Only motion away from the object counts; sideways jitter or pushing toward it does not.
     const directionalPull = moveX * dirX + moveY * dirY;
     const downwardPull = moveY * 0.6;
- 
-    // 6px dead zone so an idle fist's tracking jitter doesn't register as pulling
-    const motionPull = Math.max(0, (Math.max(directionalPull, downwardPull) - 6) / 110);
- 
+
+    // Distances are measured in "hand units" so a pull works the same whether the hand is close
+    // to the camera (big) or far away (small).
+    const unit = Math.max(18, Math.min(150, (anchor.palmScale || 0.1) * screenW));
+    const motionPull = Math.max(0, (Math.max(directionalPull, downwardPull) - unit * 0.1) / (unit * 1.5));
+
     const anchorScale = Math.max(0.04, anchor.palmScale);
     const curScale = Math.max(0.04, currentHand.palmScale);
     const depthGrowth = Math.max(0, (curScale - anchorScale) / (anchorScale * 0.3));
- 
+
     const rawPull = Math.max(motionPull, depthGrowth);
     const clampedPull = Math.max(0, Math.min(1.0, rawPull));
- 
+
     return {
       pullAmount: clampedPull,
       tension: Math.min(1.0, clampedPull * 1.3),

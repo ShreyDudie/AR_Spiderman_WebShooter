@@ -67,6 +67,31 @@ export class VisionPipeline {
     this.nextDetId = 1;
  
     this.pullDataMap = new Map();
+
+    this.realEnabled = true;
+    this.virtualDetections = [];
+    this.handCropMode = false;      // true = run the hand model on a zoomed centre crop (far-away hands)
+    this.handMissSince = null;
+    this.cropCanvas = document.createElement('canvas');
+    this.cropCtx = this.cropCanvas.getContext('2d');
+  }
+
+  _rebuildTracked() {
+    this.trackedDetections = [...this.autoDetections, ...this.manualTargets, ...this.virtualDetections];
+  }
+
+  setVirtualDetections(list) {
+    this.virtualDetections = list;
+    this._rebuildTracked();
+  }
+
+  setRealEnabled(on) {
+    this.realEnabled = on;
+    if (!on) {
+      this.autoDetections = [];
+      this.manualTargets = [];
+    }
+    this._rebuildTracked();
   }
  
   async initModels(onProgress) {
@@ -97,9 +122,9 @@ export class VisionPipeline {
       baseOptions: { modelAssetPath: handModelPath, delegate },
       runningMode: 'VIDEO',
       numHands: 2,
-      minHandDetectionConfidence: 0.5,
-      minHandPresenceConfidence: 0.5,
-      minTrackingConfidence: 0.5,
+      minHandDetectionConfidence: 0.35,
+      minHandPresenceConfidence: 0.35,
+      minTrackingConfidence: 0.35,
     });
     try {
       this.handLandmarker = await HandLandmarker.createFromOptions(vision, handOptions('GPU'));
@@ -332,76 +357,98 @@ export class VisionPipeline {
       sctx.drawImage(this.video, srcX, srcY, srcW, srcH, 0, 0, w, h);
       sctx.restore();
  
-      // Contour edge mask extraction
+      // Exact-shape cutout: flood-fill the background in from the box border instead of a
+      // plain elliptical vignette, so the kept pixels are the object's real silhouette.
       try {
         const imgData = sctx.getImageData(0, 0, w, h);
         const data = imgData.data;
- 
-        let bgR = 0, bgG = 0, bgB = 0, bgCount = 0;
-        for (let x = 0; x < w; x++) {
-          const topIdx = x * 4;
-          const botIdx = ((h - 1) * w + x) * 4;
-          bgR += data[topIdx] + data[botIdx];
-          bgG += data[topIdx + 1] + data[botIdx + 1];
-          bgB += data[topIdx + 2] + data[botIdx + 2];
-          bgCount += 2;
+        const n = w * h;
+        const isBg = new Uint8Array(n); // 0 = foreground/unknown, 1 = flagged background
+
+        const colorDist2 = (ia, ib) => {
+          const dr = data[ia * 4] - data[ib * 4];
+          const dg = data[ia * 4 + 1] - data[ib * 4 + 1];
+          const db = data[ia * 4 + 2] - data[ib * 4 + 2];
+          return dr * dr + dg * dg + db * db;
+        };
+
+        // Region-growing flood fill from every border pixel: a neighbour becomes background
+        // only if its colour is close to an ALREADY-background neighbour (not a single global
+        // average), so it follows gradients/shadows in the real backdrop but still stops dead
+        // at the object's edge instead of eating through to same-coloured patches inside it.
+        const THRESH2 = 36 * 36;
+        const stack = new Int32Array(n);
+        let sp = 0;
+        const seed = (x, y) => {
+          const i = y * w + x;
+          if (!isBg[i]) { isBg[i] = 1; stack[sp++] = i; }
+        };
+        for (let x = 0; x < w; x++) { seed(x, 0); seed(x, h - 1); }
+        for (let y = 0; y < h; y++) { seed(0, y); seed(w - 1, y); }
+
+        while (sp > 0) {
+          const i = stack[--sp];
+          const x = i % w, y = (i / w) | 0;
+          if (x > 0) { const ni = i - 1; if (!isBg[ni] && colorDist2(i, ni) < THRESH2) { isBg[ni] = 1; stack[sp++] = ni; } }
+          if (x < w - 1) { const ni = i + 1; if (!isBg[ni] && colorDist2(i, ni) < THRESH2) { isBg[ni] = 1; stack[sp++] = ni; } }
+          if (y > 0) { const ni = i - w; if (!isBg[ni] && colorDist2(i, ni) < THRESH2) { isBg[ni] = 1; stack[sp++] = ni; } }
+          if (y < h - 1) { const ni = i + w; if (!isBg[ni] && colorDist2(i, ni) < THRESH2) { isBg[ni] = 1; stack[sp++] = ni; } }
         }
-        for (let y = 1; y < h - 1; y++) {
-          const leftIdx = (y * w) * 4;
-          const rightIdx = (y * w + (w - 1)) * 4;
-          bgR += data[leftIdx] + data[rightIdx];
-          bgG += data[leftIdx + 1] + data[rightIdx + 1];
-          bgB += data[leftIdx + 2] + data[rightIdx + 2];
-          bgCount += 2;
-        }
-        bgR /= Math.max(1, bgCount);
-        bgG /= Math.max(1, bgCount);
-        bgB /= Math.max(1, bgCount);
- 
-        const cx = w * 0.5;
-        const cy = h * 0.5;
-        const rx = w * 0.5;
-        const ry = h * 0.5;
- 
+
+        // Safety net: if the flood fill ate almost everything (a near-uniform backdrop that
+        // matches the object too, or a detector box with little margin) or almost nothing
+        // (noisy backdrop), fall back to the superellipse vignette further down instead of
+        // shipping a near-blank or near-unmasked cutout.
+        let bgCount = 0;
+        for (let i = 0; i < n; i++) bgCount += isBg[i];
+        const bgRatio = bgCount / n;
+        if (bgRatio > 0.92 || bgRatio < 0.02) throw new Error('flood-fill mask unreliable');
+
+        // Soft 1px feather on the boundary so the exact silhouette doesn't look jagged.
         for (let y = 0; y < h; y++) {
-          const dy = (y - cy) / ry;
           for (let x = 0; x < w; x++) {
-            const dx = (x - cx) / rx;
-            // Superellipse (n=4) instead of a plain ellipse: keeps the corners of boxy objects
-            // (phones, books, keyboards) instead of chopping them off.
-            const normDist = Math.pow(dx * dx * dx * dx + dy * dy * dy * dy, 0.25);
-            const idx = (y * w + x) * 4;
- 
-            const r = data[idx];
-            const g = data[idx + 1];
-            const b = data[idx + 2];
- 
-            const colorDiff = Math.sqrt(
-              (r - bgR) * (r - bgR) +
-              (g - bgG) * (g - bgG) +
-              (b - bgB) * (b - bgB)
-            );
- 
-            if (normDist > 1.0) {
-              data[idx + 3] = 0;
-            } else if (normDist > 0.82 && colorDiff < 42) {
-              data[idx + 3] = 0;
-            } else if (normDist > 0.8) {
-              const edgeAlpha = Math.max(0, Math.min(1, (1.0 - normDist) / 0.2));
+            const i = y * w + x;
+            const idx = i * 4;
+            if (isBg[i]) { data[idx + 3] = 0; continue; }
+            let bgNeighbors = 0;
+            let total = 0;
+            for (let oy = -1; oy <= 1; oy++) {
+              for (let ox = -1; ox <= 1; ox++) {
+                const nx = x + ox, ny = y + oy;
+                if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                total++;
+                if (isBg[ny * w + nx]) bgNeighbors++;
+              }
+            }
+            if (bgNeighbors > 0) {
+              const edgeAlpha = Math.max(0.15, 1 - bgNeighbors / total);
               data[idx + 3] = Math.round(data[idx + 3] * edgeAlpha);
             }
           }
         }
- 
+
         sctx.putImageData(imgData, 0, 0);
       } catch (segErr) {
-        sctx.globalCompositeOperation = 'destination-in';
-        sctx.beginPath();
-        sctx.ellipse(w * 0.5, h * 0.5, w * 0.48, h * 0.48, 0, 0, Math.PI * 2);
-        sctx.fill();
-        sctx.globalCompositeOperation = 'source-over';
+        // Fallback: soft superellipse vignette (keeps boxy corners better than a plain ellipse)
+        const imgData2 = sctx.getImageData(0, 0, w, h);
+        const data2 = imgData2.data;
+        const cx = w * 0.5, cy = h * 0.5, rx = w * 0.5, ry = h * 0.5;
+        for (let y = 0; y < h; y++) {
+          const dy = (y - cy) / ry;
+          for (let x = 0; x < w; x++) {
+            const dx = (x - cx) / rx;
+            const normDist = Math.pow(dx * dx * dx * dx + dy * dy * dy * dy, 0.25);
+            const idx = (y * w + x) * 4;
+            if (normDist > 1.0) data2[idx + 3] = 0;
+            else if (normDist > 0.8) {
+              const edgeAlpha = Math.max(0, Math.min(1, (1.0 - normDist) / 0.2));
+              data2[idx + 3] = Math.round(data2[idx + 3] * edgeAlpha);
+            }
+          }
+        }
+        sctx.putImageData(imgData2, 0, 0);
       }
- 
+
       return snapCanvas;
     } catch (e) {
       console.warn('Contour cutout capture failed:', e);
@@ -422,19 +469,54 @@ export class VisionPipeline {
     this.lastVideoTime = this.video.currentTime;
  
     try {
-      const result = this.handLandmarker.detectForVideo(this.video, now);
-      if (result && result.landmarks && result.landmarks.length > 0) {
+      const vw = this.video.videoWidth;
+      const vh = this.video.videoHeight;
+      const CROP = 0.58; // zoomed centre window: makes a far-away (small) hand ~1.7x bigger for the model
+      let input = this.video;
+      let cx0 = 0, cy0 = 0, cw = vw, ch = vh;
+      if (this.handCropMode && vw && vh) {
+        cw = vw * CROP; ch = vh * CROP;
+        cx0 = (vw - cw) / 2; cy0 = (vh - ch) / 2;
+        const tw = Math.round(cw), th = Math.round(ch);
+        if (this.cropCanvas.width !== tw || this.cropCanvas.height !== th) {
+          this.cropCanvas.width = tw;
+          this.cropCanvas.height = th;
+        }
+        this.cropCtx.drawImage(this.video, cx0, cy0, cw, ch, 0, 0, tw, th);
+        input = this.cropCanvas;
+      }
+
+      let result = this.handLandmarker.detectForVideo(input, now);
+      const found = result && result.landmarks && result.landmarks.length > 0;
+
+      if (found) {
+        this.handMissSince = null;
+        if (this.handCropMode) {
+          result = {
+            ...result,
+            landmarks: result.landmarks.map((hand) =>
+              hand.map((p) => ({ ...p, x: (cx0 + p.x * cw) / vw, y: (cy0 + p.y * ch) / vh }))
+            ),
+          };
+        }
         this.lastHandsResult = result;
         this.lastHandsTime = now;
+      } else {
+        // Nothing seen: alternate between full-frame and zoomed-crop passes until a hand shows up.
+        if (this.handMissSince == null) this.handMissSince = now;
+        if (now - this.handMissSince > 240) {
+          this.handCropMode = !this.handCropMode;
+          this.handMissSince = now;
+        }
       }
       return result;
     } catch (e) {
       return null;
     }
   }
- 
+
   detectObjects(now) {
-    if (!this.objectDetector || !this.video || this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+    if (!this.realEnabled || !this.objectDetector || !this.video || this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
       return this.trackedDetections;
     }
     // Update at ~5 fps (200ms) for responsive, low-latency tracking
@@ -555,7 +637,7 @@ export class VisionPipeline {
       }
 
       this.autoDetections = matched;
-      this.trackedDetections = [...matched, ...this.manualTargets];
+      this._rebuildTracked();
     } catch (err) {
       console.warn('Object detection error:', err);
     } finally {
@@ -578,14 +660,14 @@ export class VisionPipeline {
     };
     this.manualTargets.unshift(manual);
     if (this.manualTargets.length > 6) this.manualTargets.pop();
-    this.trackedDetections = [...this.autoDetections, ...this.manualTargets];
+    this._rebuildTracked();
     return manual;
   }
  
   clearTargets() {
     this.manualTargets = [];
     this.autoDetections = [];
-    this.trackedDetections = [];
+    this._rebuildTracked();
     this.lastObjectDetectTime = 0;
   }
  

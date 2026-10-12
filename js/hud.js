@@ -14,6 +14,27 @@ export class SpiderHUD {
     this.screenFlashAlpha = 0;
     this.smoothCrosshair = { x: window.innerWidth * 0.5, y: window.innerHeight * 0.5 };
     this.crosshairWasActive = false;
+    this.shakeUntil = 0;
+    this.shakeMag = 0;
+    this.shakeDuration = 1;
+    this.aimRay = null;
+  }
+
+  // Brief camera-shake impulse (e.g. on web impact). mag = pixels, ms = duration.
+  triggerShake(mag = 6, ms = 160) {
+    this.shakeUntil = performance.now() + ms;
+    this.shakeMag = mag;
+    this.shakeDuration = ms;
+  }
+
+  getShakeOffset(now) {
+    const remaining = this.shakeUntil - now;
+    if (remaining <= 0) return { x: 0, y: 0 };
+    const decay = remaining / this.shakeDuration;
+    return {
+      x: (Math.random() - 0.5) * 2 * this.shakeMag * decay,
+      y: (Math.random() - 0.5) * 2 * this.shakeMag * decay,
+    };
   }
  
   drawHandSkeleton(ctx, handStates, vision, now) {
@@ -161,17 +182,39 @@ export class SpiderHUD {
     ctx.restore();
  
     // ---- launch line from the wrist shooter to the crosshair ----
-    const muzzle = vision.pointToScreen(aimHand.shooterMuzzle);
+    const shooters = candidateTarget && candidateTarget.detection.heavy && handStates.length > 1 ? handStates : [aimHand];
     ctx.save();
     ctx.strokeStyle = isLocked ? 'rgba(213, 255, 133, 0.65)' : 'rgba(102, 246, 255, 0.4)';
     ctx.lineWidth = isLocked ? 2 : 1.2;
     ctx.setLineDash([8, 6]);
     ctx.lineDashOffset = -now * 0.04;
-    ctx.beginPath();
-    ctx.moveTo(muzzle.x, muzzle.y);
-    ctx.lineTo(cx, cy);
-    ctx.stroke();
+    for (const h of shooters) {
+      const muzzle = vision.pointToScreen(h.shooterMuzzle);
+      ctx.beginPath();
+      ctx.moveTo(muzzle.x, muzzle.y);
+      ctx.lineTo(cx, cy);
+      ctx.stroke();
+    }
     ctx.restore();
+
+    // ---- pointing ray: shows exactly where the finger is aiming (newcomer-friendly) ----
+    if (this.aimRay && this.aimRay.reach > 0 && !isLocked) {
+      const r = this.aimRay;
+      ctx.save();
+      const grad = ctx.createLinearGradient(r.tip.x, r.tip.y, r.end.x, r.end.y);
+      grad.addColorStop(0, 'rgba(102, 246, 255, 0.85)');
+      grad.addColorStop(1, 'rgba(102, 246, 255, 0)');
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.shadowColor = '#66f6ff';
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.moveTo(r.tip.x, r.tip.y);
+      ctx.lineTo(r.end.x, r.end.y);
+      ctx.stroke();
+      ctx.restore();
+    }
  
     // ---- reticle ----
     ctx.save();
@@ -219,8 +262,8 @@ export class SpiderHUD {
       ctx.stroke();
  
       ctx.shadowBlur = 0;
-      const tag = candidateTarget.detection.heavy ? ' · 2 HANDS' : '';
-      const text = `TARGET LOCKED // ${candidateTarget.detection.class.toUpperCase()}${tag}`;
+      const tag = candidateTarget.detection.heavy ? ' · HEAVY · 2 HANDS' : '';
+      const text = `TARGET LOCKED${tag}`;
       ctx.font = '700 10.5px Inter, monospace';
       const tw = ctx.measureText(text).width;
       ctx.fillStyle = 'rgba(4, 14, 25, 0.9)';
@@ -243,35 +286,44 @@ export class SpiderHUD {
     ctx.restore();
   }
  
-  // phase === 'IDLE' draws objects dimly with no lock / READY styling
-  drawDetections(ctx, detections, vision, lockedTargetId, candidateTarget, phase = 'AIM') {
+  // Target markers: sleek corner brackets + a tiny centre pip. No object names — just detection.
+  // phase === 'IDLE' draws them dimly; the aim candidate gets a bright lime frame and spinning ring.
+  drawDetections(ctx, detections, vision, lockedTargetId, candidateTarget, phase = 'AIM', now = performance.now()) {
     const idle = phase === 'IDLE';
     for (const det of detections) {
       if (lockedTargetId && det.id === lockedTargetId) continue;
- 
+
       const rect = vision.boxToScreen(det.bbox);
       if (!rect || rect.w <= 0 || rect.h <= 0) continue;
- 
+
       const isAimCandidate = !idle && candidateTarget && candidateTarget.detection.id === det.id;
- 
+      const color = isAimCandidate ? '#d5ff85' : det.heavy ? '#ff8aa0' : '#66f6ff';
+      const pad = 4;
+      const x = rect.x - pad, y = rect.y - pad, w = rect.w + pad * 2, h = rect.h + pad * 2;
+      const breathe = isAimCandidate ? Math.sin(now * 0.012) * 2 : 0;
+
       ctx.save();
-      ctx.globalAlpha = idle ? 0.4 : 1;
-      ctx.strokeStyle = isAimCandidate ? '#d5ff85' : 'rgba(102, 246, 255, 0.75)';
-      ctx.lineWidth = isAimCandidate ? 2.4 : 1.4;
-      ctx.shadowColor = isAimCandidate ? '#d5ff85' : '#38eaff';
-      ctx.shadowBlur = isAimCandidate ? 16 : idle ? 0 : 8;
- 
-      ctx.setLineDash(isAimCandidate ? [] : [6, 5]);
-      ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
-      ctx.setLineDash([]);
- 
-      const c = Math.min(14, rect.w * 0.22, rect.h * 0.22);
-      ctx.lineWidth = isAimCandidate ? 3.5 : 2.5;
+      ctx.globalAlpha = idle ? 0.45 : 1;
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = isAimCandidate ? 18 : idle ? 0 : 9;
+      ctx.lineCap = 'round';
+
+      if (isAimCandidate) {
+        ctx.fillStyle = 'rgba(213, 255, 133, 0.07)';
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = color;
+      }
+
+      const c = Math.min(isAimCandidate ? 22 : 16, w * 0.28, h * 0.28);
+      ctx.lineWidth = isAimCandidate ? 3.6 : 2.4;
+      const o = breathe;
       [
-        [rect.x, rect.y, 1, 1],
-        [rect.x + rect.w, rect.y, -1, 1],
-        [rect.x, rect.y + rect.h, 1, -1],
-        [rect.x + rect.w, rect.y + rect.h, -1, -1],
+        [x - o, y - o, 1, 1],
+        [x + w + o, y - o, -1, 1],
+        [x - o, y + h + o, 1, -1],
+        [x + w + o, y + h + o, -1, -1],
       ].forEach(([bx, by, sx, sy]) => {
         ctx.beginPath();
         ctx.moveTo(bx, by + sy * c);
@@ -279,20 +331,55 @@ export class SpiderHUD {
         ctx.lineTo(bx + sx * c, by);
         ctx.stroke();
       });
- 
-      ctx.shadowBlur = 0;
-      const label = `${det.class.toUpperCase()}${det.heavy ? ' · 2 HANDS' : ''}${isAimCandidate ? ' · LOCKED' : ''}`;
-      ctx.font = '700 10px Inter, sans-serif';
-      const tw = ctx.measureText(label).width;
-      ctx.fillStyle = isAimCandidate ? 'rgba(15, 35, 20, 0.92)' : 'rgba(4, 14, 25, 0.85)';
-      ctx.fillRect(rect.x, Math.max(0, rect.y - 20), tw + 14, 18);
-      ctx.fillStyle = isAimCandidate ? '#d5ff85' : '#eef8ff';
-      ctx.fillText(label, rect.x + 6, Math.max(13, rect.y - 7));
- 
+
+      // scanning line sweeping through a candidate
+      if (isAimCandidate) {
+        const sweep = ((now * 0.0016) % 1) * h;
+        ctx.globalAlpha = 0.55;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(x + 4, y + sweep);
+        ctx.lineTo(x + w - 4, y + sweep);
+        ctx.stroke();
+      }
+
+      // centre pip
+      ctx.globalAlpha = idle ? 0.35 : 0.9;
+      ctx.beginPath();
+      ctx.arc(rect.x + rect.w / 2, rect.y + rect.h / 2, isAimCandidate ? 3.5 : 2.2, 0, Math.PI * 2);
+      ctx.fill();
+
       ctx.restore();
     }
   }
- 
+
+  // Radial speed lines + soft edge glow while an object is being reeled in.
+  drawSpeedLines(ctx, w, h, intensity, now) {
+    if (intensity < 0.08) return;
+    const cx = w / 2, cy = h / 2;
+    const diag = Math.hypot(w, h) / 2;
+    ctx.save();
+    ctx.lineCap = 'round';
+    const count = Math.round(14 + intensity * 26);
+    for (let i = 0; i < count; i++) {
+      const ang = Math.random() * Math.PI * 2;
+      const r0 = diag * (0.55 + Math.random() * 0.25);
+      const r1 = r0 + diag * (0.12 + Math.random() * 0.3) * intensity;
+      ctx.strokeStyle = `rgba(255, 255, 255, ${0.05 + Math.random() * 0.22 * intensity})`;
+      ctx.lineWidth = 0.8 + Math.random() * 1.8;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(ang) * r0, cy + Math.sin(ang) * r0);
+      ctx.lineTo(cx + Math.cos(ang) * r1, cy + Math.sin(ang) * r1);
+      ctx.stroke();
+    }
+    const vg = ctx.createRadialGradient(cx, cy, diag * 0.55, cx, cy, diag * 1.05);
+    vg.addColorStop(0, 'rgba(255, 51, 85, 0)');
+    vg.addColorStop(1, `rgba(255, 51, 85, ${0.22 * intensity})`);
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, w, h);
+    ctx.restore();
+  }
+
   triggerFlash() {
     this.screenFlashAlpha = 0.55;
   }

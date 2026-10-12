@@ -9,241 +9,302 @@
   <title>SPIDEY AR // Real-Time Web Shooter</title>
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <link rel="preconnect" href="https://storage.googleapis.com" crossorigin>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
       color-scheme: dark;
-      --ink: #eef8ff;
-      --muted: #8ea5bb;
+      --ink: #f1f8ff;
+      --muted: #8da4ba;
       --cyan: #66f6ff;
       --lime: #d5ff85;
-      --spidey-red: #ff3355;
-      --panel: rgba(8, 16, 28, 0.78);
-      --panel-border: rgba(102, 246, 255, 0.25);
-      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --red: #ff3355;
+      --glass: rgba(8, 14, 25, 0.55);
+      --glass-strong: rgba(8, 14, 25, 0.78);
+      --edge: rgba(255, 255, 255, 0.1);
+      --edge-hot: rgba(102, 246, 255, 0.35);
+      --font: "Rajdhani", "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif;
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html, body {
       width: 100%; height: 100%; margin: 0; padding: 0;
       overflow: hidden; background: #05080e; color: var(--ink);
-      font-family: var(--font); user-select: none; -webkit-user-select: none;
+      font-family: var(--font); font-weight: 600; user-select: none; -webkit-user-select: none;
       overscroll-behavior: none;
     }
+
+    /* ---------- camera + atmosphere ---------- */
     #camera-feed {
       position: fixed; inset: 0; width: 100%; height: 100%;
       object-fit: cover; z-index: 1; background: #05080e;
+      filter: contrast(1.07) saturate(1.15) brightness(0.95);
       transition: transform 0.25s ease;
     }
     .camera-shade {
       position: fixed; inset: 0; z-index: 2; pointer-events: none;
-      background: radial-gradient(circle at center, transparent 40%, rgba(2, 6, 12, 0.65) 100%),
-                  linear-gradient(180deg, rgba(3, 8, 16, 0.7) 0%, transparent 22%, transparent 72%, rgba(3, 8, 16, 0.75) 100%);
+      background:
+        radial-gradient(ellipse at center, transparent 45%, rgba(2, 6, 14, 0.7) 100%),
+        linear-gradient(180deg, rgba(3, 8, 18, 0.72) 0%, transparent 20%, transparent 70%, rgba(3, 8, 18, 0.8) 100%);
+    }
+    .scanlines {
+      position: fixed; inset: 0; z-index: 2; pointer-events: none; opacity: 0.07; mix-blend-mode: overlay;
+      background: repeating-linear-gradient(0deg, #fff 0, #fff 1px, transparent 1px, transparent 3px);
     }
     #vision-overlay {
       position: fixed; inset: 0; z-index: 3; width: 100%; height: 100%;
       pointer-events: auto; touch-action: none;
     }
+    .frame { position: fixed; inset: 10px; z-index: 4; pointer-events: none; }
+    .frame i {
+      position: absolute; width: 26px; height: 26px; border: 0 solid rgba(102, 246, 255, 0.55);
+      filter: drop-shadow(0 0 6px rgba(102, 246, 255, 0.6)); animation: framePulse 3.2s ease-in-out infinite;
+    }
+    .frame i:nth-child(1) { top: 0; left: 0; border-top-width: 2px; border-left-width: 2px; border-top-left-radius: 8px; }
+    .frame i:nth-child(2) { top: 0; right: 0; border-top-width: 2px; border-right-width: 2px; border-top-right-radius: 8px; }
+    .frame i:nth-child(3) { bottom: 0; left: 0; border-bottom-width: 2px; border-left-width: 2px; border-bottom-left-radius: 8px; }
+    .frame i:nth-child(4) { bottom: 0; right: 0; border-bottom-width: 2px; border-right-width: 2px; border-bottom-right-radius: 8px; }
+    @keyframes framePulse { 50% { opacity: 0.45; } }
+
     #app {
       position: fixed; inset: 0; z-index: 5; pointer-events: none;
       display: flex; flex-direction: column; justify-content: space-between;
     }
+
+    /* ---------- shared glass ---------- */
+    .glass {
+      background: var(--glass); border: 1px solid var(--edge); border-radius: 18px;
+      backdrop-filter: blur(18px) saturate(1.3); -webkit-backdrop-filter: blur(18px) saturate(1.3);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    }
+
+    /* ---------- top bar ---------- */
     .topbar {
-      display: flex; align-items: flex-start; justify-content: space-between;
-      padding: max(16px, env(safe-area-inset-top)) 16px 0; pointer-events: none;
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+      padding: max(18px, env(safe-area-inset-top)) 18px 0; pointer-events: none;
     }
-    .brand { display: flex; gap: 10px; align-items: center; }
+    .brand { display: flex; gap: 11px; align-items: center; }
     .brand-mark {
-      display: grid; width: 38px; height: 38px; place-items: center;
-      border: 1.5px solid var(--spidey-red); border-radius: 12px;
-      background: rgba(255, 51, 85, 0.12); color: var(--spidey-red);
-      box-shadow: 0 0 20px rgba(255, 51, 85, 0.35); font-size: 20px; font-weight: 900;
+      position: relative; display: grid; width: 42px; height: 42px; place-items: center;
+      border-radius: 14px; font-size: 22px;
+      background: linear-gradient(145deg, rgba(255, 51, 85, 0.35), rgba(255, 51, 85, 0.08));
+      border: 1px solid rgba(255, 51, 85, 0.6);
+      box-shadow: 0 0 24px rgba(255, 51, 85, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.25);
     }
-    .brand-copy strong { display: block; font-size: 13px; letter-spacing: 0.2em; font-weight: 800; }
-    .brand-copy span { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; letter-spacing: 0.15em; }
+    .brand-copy strong { display: block; font-size: 17px; font-weight: 700; letter-spacing: 0.22em; line-height: 1; }
+    .brand-copy span { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: 0.22em; }
 
     .status {
-      display: flex; gap: 8px; align-items: center; min-height: 36px;
-      padding: 0 13px; border: 1px solid var(--panel-border); border-radius: 99px;
-      background: var(--panel); color: #d8e8f4; font-size: 10px; letter-spacing: 0.1em;
-      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-      pointer-events: auto;
+      display: flex; gap: 9px; align-items: center; min-height: 36px; padding: 0 15px;
+      border-radius: 99px; font-size: 12px; font-weight: 700; letter-spacing: 0.14em; color: #dcebf7;
+      background: var(--glass-strong); border: 1px solid var(--edge);
+      backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); pointer-events: auto;
     }
-    .status-dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: #687a8b; box-shadow: 0 0 10px currentColor;
-    }
-    .status[data-state="ready"] .status-dot { background: var(--lime); color: var(--lime); }
-    .status[data-state="tracking"] .status-dot { background: var(--cyan); color: var(--cyan); }
-    .status[data-state="error"] .status-dot { background: var(--spidey-red); color: var(--spidey-red); }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #687a8b; box-shadow: 0 0 10px currentColor; }
+    .status[data-state="ready"] .status-dot { background: var(--lime); color: var(--lime); animation: blink 2s infinite; }
+    .status[data-state="tracking"] .status-dot { background: var(--cyan); color: var(--cyan); animation: blink 0.8s infinite; }
+    .status[data-state="error"] .status-dot { background: var(--red); color: var(--red); }
+    @keyframes blink { 50% { opacity: 0.35; } }
 
+    /* ---------- left gesture card ---------- */
     .readout {
-      position: absolute; top: max(72px, calc(env(safe-area-inset-top) + 60px)); left: 16px;
-      display: grid; gap: 8px; width: min(260px, calc(100vw - 32px)); pointer-events: none;
+      position: absolute; top: max(78px, calc(env(safe-area-inset-top) + 66px)); left: 18px;
+      width: min(280px, calc(100vw - 36px)); pointer-events: none; display: grid; gap: 10px;
     }
-    .readout-card {
-      padding: 12px 14px; border: 1px solid var(--panel-border); border-radius: 14px;
-      background: var(--panel); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-      pointer-events: auto;
-    }
-    .eyebrow { color: var(--cyan); font-size: 9px; font-weight: 800; letter-spacing: 0.18em; }
-    .readout-main {
-      display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
-      margin-top: 6px; font-size: 12px;
-    }
-    .readout-main span:last-child { color: var(--muted); font-size: 10px; text-align: right; }
-    .meter {
-      height: 4px; margin-top: 8px; overflow: hidden; border-radius: 4px;
-      background: rgba(255, 255, 255, 0.12);
-    }
+    .readout-card { padding: 14px 15px 13px; pointer-events: auto; }
+    .eyebrow { color: var(--cyan); font-size: 10px; font-weight: 700; letter-spacing: 0.24em; opacity: 0.9; }
+    .readout-main { margin-top: 7px; }
+    #hand-state { display: block; font-size: 19px; font-weight: 700; letter-spacing: 0.06em; line-height: 1.1; }
+    #hand-detail { display: block; margin-top: 3px; color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; }
+    .meter { height: 5px; margin-top: 11px; overflow: hidden; border-radius: 5px; background: rgba(255, 255, 255, 0.1); }
     .meter > i {
       display: block; width: 0%; height: 100%; border-radius: inherit;
-      background: linear-gradient(90deg, var(--cyan), var(--lime));
-      transition: width 0.1s linear;
+      background: linear-gradient(90deg, var(--cyan), var(--lime)); box-shadow: 0 0 12px rgba(102, 246, 255, 0.7);
+      transition: width 0.12s linear;
     }
 
-    /* 4-movement step tracker */
-    .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin-top: 10px; }
+    .steps { position: relative; display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 13px; }
     .step {
-      padding: 6px 2px 5px; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 9px;
-      text-align: center; opacity: 0.5; transition: opacity 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+      padding: 7px 2px 6px; border-radius: 12px; text-align: center; opacity: 0.45;
+      border: 1px solid rgba(255, 255, 255, 0.1); background: rgba(255, 255, 255, 0.03);
+      transition: all 0.2s ease;
     }
-    .step b { display: block; font-size: 12px; line-height: 1; }
-    .step small { display: block; margin-top: 3px; font-size: 7.5px; letter-spacing: 0.08em; color: var(--muted); }
+    .step b { display: block; font-size: 17px; line-height: 1; }
+    .step small { display: block; margin-top: 4px; font-size: 9px; font-weight: 700; letter-spacing: 0.12em; color: var(--muted); }
     .step.active {
-      opacity: 1; border-color: rgba(213, 255, 133, 0.75);
-      background: rgba(213, 255, 133, 0.12); box-shadow: 0 0 14px rgba(213, 255, 133, 0.2);
+      opacity: 1; transform: translateY(-2px); border-color: rgba(213, 255, 133, 0.7);
+      background: linear-gradient(180deg, rgba(213, 255, 133, 0.18), rgba(213, 255, 133, 0.04));
+      box-shadow: 0 0 18px rgba(213, 255, 133, 0.25);
     }
     .step.active small { color: var(--lime); }
 
-    .bottom {
-      padding: 0 16px max(16px, env(safe-area-inset-bottom));
-      display: flex; align-items: flex-end; justify-content: space-between; gap: 12px;
-      pointer-events: none;
-    }
-    .hint {
-      max-width: min(480px, 68vw); padding: 12px 14px; border: 1px solid var(--panel-border);
-      border-radius: 14px; background: var(--panel); color: #d0e0ed; font-size: 11px;
-      line-height: 1.45; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-      pointer-events: auto;
-    }
-    .hint strong { color: #ffffff; display: block; margin-bottom: 3px; }
-    .hint small { display: block; color: var(--muted); font-size: 9.5px; }
-
-    .controls { display: flex; gap: 8px; flex-wrap: wrap; pointer-events: auto; }
-    button {
-      min-height: 42px; padding: 0 13px; border: 1px solid var(--panel-border);
-      border-radius: 12px; background: rgba(10, 24, 38, 0.88); color: var(--ink);
-      font: inherit; font-size: 10px; font-weight: 750; letter-spacing: 0.1em;
-      cursor: pointer; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-      transition: transform 0.1s ease, background 0.15s ease, border-color 0.15s ease;
-    }
-    button:active { transform: scale(0.96); }
-    button.primary {
-      border-color: rgba(213, 255, 133, 0.6);
-      background: linear-gradient(135deg, rgba(30, 92, 60, 0.9), rgba(15, 60, 75, 0.95));
-      box-shadow: 0 0 20px rgba(102, 246, 255, 0.2);
-    }
-    button:disabled { opacity: 0.5; cursor: wait; }
-
-    .shoot-btn {
-      position: fixed; right: 20px; bottom: max(96px, calc(env(safe-area-inset-bottom) + 90px));
-      width: 68px; height: 68px; border-radius: 50%;
-      border: 2px solid var(--spidey-red);
-      background: radial-gradient(circle at 35% 35%, #ff4d6d, #c9183b 70%, #800a20 100%);
-      color: #ffffff; font-size: 11px; font-weight: 900; letter-spacing: 0.08em;
-      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-      box-shadow: 0 0 25px rgba(255, 51, 85, 0.55), 0 8px 24px rgba(0,0,0,0.5), inset 0 0 12px rgba(255,255,255,0.3);
-      cursor: pointer; z-index: 12; pointer-events: auto;
-      transition: transform 0.12s ease, box-shadow 0.15s ease;
-    }
-    .shoot-btn:active { transform: scale(0.9); box-shadow: 0 0 35px rgba(255, 51, 85, 0.85); }
-    .shoot-btn i { font-style: normal; font-size: 20px; line-height: 1; }
-
-    .toast {
-      position: absolute; top: 46%; left: 50%; padding: 11px 18px;
-      border: 1px solid rgba(102, 246, 255, 0.45); border-radius: 14px;
-      background: rgba(6, 16, 28, 0.92); color: #f2fcff; font-size: 11.5px;
-      font-weight: 600; letter-spacing: 0.04em; pointer-events: none;
-      opacity: 0; transform: translate(-50%, -20%) scale(0.95);
-      transition: opacity 0.2s ease, transform 0.2s ease;
+    /* stat chips (targets / collected) */
+    .chips { display: flex; gap: 8px; pointer-events: none; }
+    .chip {
+      display: flex; align-items: baseline; gap: 7px; padding: 8px 13px; border-radius: 99px;
+      font-size: 12px; font-weight: 700; letter-spacing: 0.14em;
+      background: var(--glass-strong); border: 1px solid var(--edge);
       backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-      box-shadow: 0 10px 30px rgba(0,0,0,0.5), 0 0 20px rgba(102, 246, 255, 0.2);
-      text-align: center; max-width: 85vw;
+    }
+    .chip em { font-style: normal; color: var(--cyan); }
+    .chip.score em { color: var(--lime); }
+
+    /* ---------- toast + banner ---------- */
+    .toast {
+      position: absolute; top: 44%; left: 50%; padding: 12px 20px; border-radius: 16px;
+      font-size: 14px; font-weight: 700; letter-spacing: 0.06em; text-align: center; max-width: 86vw;
+      pointer-events: none; opacity: 0; transform: translate(-50%, -20%) scale(0.95);
+      background: rgba(6, 14, 26, 0.9); border: 1px solid var(--edge-hot);
+      box-shadow: 0 12px 34px rgba(0, 0, 0, 0.55), 0 0 24px rgba(102, 246, 255, 0.2);
+      backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+      transition: opacity 0.22s ease, transform 0.22s ease;
     }
     .toast.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
 
     .caught {
-      position: absolute; top: 40%; left: 50%; color: #ffffff;
-      font-size: clamp(20px, 6vw, 32px); font-weight: 900; letter-spacing: 0.25em;
-      opacity: 0; pointer-events: none; text-shadow: 0 0 25px var(--cyan), 0 0 50px var(--lime);
-      transform: translate(-50%, -50%) scale(0.6); text-align: center;
-      width: 100%;
+      position: absolute; top: 38%; left: 50%; width: 100%; text-align: center; pointer-events: none; opacity: 0;
+      font-size: clamp(26px, 8vw, 46px); font-weight: 700; letter-spacing: 0.3em; color: #fff;
+      text-shadow: 0 0 22px var(--cyan), 0 0 48px var(--lime);
+      transform: translate(-50%, -50%) scale(0.6);
     }
-    .caught.show { animation: caughtAnim 1.1s cubic-bezier(0.1, 0.9, 0.2, 1) forwards; }
+    .caught.show { animation: caughtAnim 1.2s cubic-bezier(0.1, 0.9, 0.2, 1) forwards; }
     @keyframes caughtAnim {
       0% { opacity: 0; transform: translate(-50%, -50%) scale(0.6); }
       20% { opacity: 1; transform: translate(-50%, -50%) scale(1.15); }
-      70% { opacity: 1; transform: translate(-50%, -50%) scale(1.0); }
-      100% { opacity: 0; transform: translate(-50%, -90%) scale(0.9); }
+      70% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+      100% { opacity: 0; transform: translate(-50%, -95%) scale(0.92); }
     }
 
+    /* ---------- bottom: coach card + dock ---------- */
+    .bottom {
+      display: flex; align-items: flex-end; justify-content: space-between; gap: 14px;
+      padding: 0 18px max(18px, env(safe-area-inset-bottom)); pointer-events: none;
+    }
+    .hint { max-width: min(460px, 56vw); padding: 14px 17px; pointer-events: auto; border-color: var(--edge-hot); }
+    .hint strong { display: block; font-size: 18px; font-weight: 700; letter-spacing: 0.06em; line-height: 1.15; }
+    .hint small { display: block; margin-top: 5px; color: #b6c9da; font-size: 12.5px; font-weight: 600; line-height: 1.4; letter-spacing: 0.02em; }
+
+    .controls { display: flex; gap: 8px; pointer-events: auto; }
+    .dock-btn {
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+      width: 62px; height: 58px; padding: 0; border-radius: 16px; cursor: pointer;
+      font: inherit; color: var(--ink);
+      background: var(--glass-strong); border: 1px solid var(--edge);
+      backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+      transition: transform 0.12s ease, border-color 0.15s ease, background 0.15s ease;
+    }
+    .dock-btn i { font-style: normal; font-size: 20px; line-height: 1; }
+    .dock-btn span { font-size: 9.5px; font-weight: 700; letter-spacing: 0.14em; color: var(--muted); }
+    .dock-btn:hover { border-color: var(--edge-hot); }
+    .dock-btn:active { transform: scale(0.94); }
+    .dock-btn.accent { border-color: rgba(213, 255, 133, 0.45); }
+    .dock-btn.accent span { color: var(--lime); }
+
+    .shoot-btn {
+      position: fixed; right: 20px; bottom: max(100px, calc(env(safe-area-inset-bottom) + 94px));
+      width: 74px; height: 74px; border-radius: 50%; z-index: 12; pointer-events: auto; cursor: pointer;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+      color: #fff; font: inherit; font-size: 12px; font-weight: 700; letter-spacing: 0.14em;
+      border: 2px solid rgba(255, 120, 140, 0.9);
+      background: radial-gradient(circle at 35% 30%, #ff6b85, #cc1840 62%, #70081f 100%);
+      box-shadow: 0 0 28px rgba(255, 51, 85, 0.6), 0 10px 26px rgba(0, 0, 0, 0.55), inset 0 0 14px rgba(255, 255, 255, 0.3);
+      transition: transform 0.12s ease;
+    }
+    .shoot-btn::after {
+      content: ""; position: absolute; inset: -9px; border-radius: 50%;
+      border: 2px solid rgba(255, 51, 85, 0.5); animation: ring 2.2s ease-out infinite;
+    }
+    @keyframes ring { 0% { transform: scale(0.88); opacity: 0.9; } 100% { transform: scale(1.3); opacity: 0; } }
+    .shoot-btn:active { transform: scale(0.9); }
+    .shoot-btn i { font-style: normal; font-size: 24px; line-height: 1; }
+
+    /* ---------- start gate ---------- */
     .gate {
-      position: fixed; inset: 0; z-index: 20; display: grid; place-items: center;
-      padding: 20px; background: rgba(3, 7, 14, 0.88); backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px); pointer-events: auto; overflow-y: auto;
-      transition: opacity 0.35s ease, visibility 0.35s ease;
+      position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; overflow-y: auto;
+      background:
+        radial-gradient(ellipse at 20% 0%, rgba(255, 51, 85, 0.18), transparent 55%),
+        radial-gradient(ellipse at 90% 100%, rgba(102, 246, 255, 0.14), transparent 55%),
+        rgba(3, 7, 14, 0.92);
+      backdrop-filter: blur(22px); -webkit-backdrop-filter: blur(22px); pointer-events: auto;
+      transition: opacity 0.4s ease, visibility 0.4s ease;
     }
     .gate.hidden { visibility: hidden; opacity: 0; pointer-events: none; }
     .gate-card {
-      width: min(440px, 100%); padding: 26px; border: 1px solid var(--panel-border);
-      border-radius: 24px; background: linear-gradient(150deg, rgba(14, 28, 44, 0.96), rgba(8, 14, 24, 0.98));
-      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.65), 0 0 50px rgba(102, 246, 255, 0.12);
+      position: relative; width: min(460px, 100%); padding: 28px 26px 26px; border-radius: 26px; overflow: hidden;
+      background: linear-gradient(155deg, rgba(16, 30, 48, 0.96), rgba(8, 14, 24, 0.98));
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      box-shadow: 0 34px 90px rgba(0, 0, 0, 0.7), 0 0 60px rgba(102, 246, 255, 0.12);
+    }
+    .gate-card::before {
+      content: ""; position: absolute; right: -60px; top: -60px; width: 230px; height: 230px; opacity: 0.35; pointer-events: none;
+      background:
+        repeating-radial-gradient(circle at 100% 0, transparent 0 22px, rgba(255, 255, 255, 0.55) 22px 23px),
+        repeating-conic-gradient(from 90deg at 100% 0, rgba(255, 255, 255, 0.55) 0 1deg, transparent 1deg 15deg);
+      -webkit-mask-image: radial-gradient(circle at 100% 0, #000 0, transparent 70%);
+      mask-image: radial-gradient(circle at 100% 0, #000 0, transparent 70%);
     }
     .gate-card h1 {
-      margin: 10px 0 8px; font-size: clamp(26px, 7vw, 36px);
-      letter-spacing: 0.08em; font-weight: 900;
-      background: linear-gradient(90deg, #ffffff, var(--cyan));
-      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      position: relative; margin: 10px 0 8px; font-size: clamp(32px, 9vw, 44px); font-weight: 700; letter-spacing: 0.1em; line-height: 1;
+      background: linear-gradient(90deg, #fff, var(--cyan)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
     }
-    .gate-card p { color: #adc0d0; font-size: 13px; line-height: 1.6; margin-bottom: 14px; }
+    .gate-card p { position: relative; margin: 0 0 14px; color: #b3c6d6; font-size: 14.5px; font-weight: 600; line-height: 1.5; }
     .move-list { display: grid; gap: 8px; margin: 14px 0; }
     .move {
-      display: flex; gap: 12px; align-items: center; padding: 10px 12px;
-      border: 1px solid rgba(213, 255, 133, 0.3); border-radius: 14px;
-      background: rgba(213, 255, 133, 0.06);
+      display: flex; gap: 12px; align-items: center; padding: 10px 13px; border-radius: 15px;
+      border: 1px solid rgba(213, 255, 133, 0.28); background: linear-gradient(90deg, rgba(213, 255, 133, 0.08), rgba(213, 255, 133, 0.02));
     }
     .move-num {
       display: grid; place-items: center; flex: none; width: 26px; height: 26px; border-radius: 50%;
-      background: rgba(213, 255, 133, 0.18); color: var(--lime); font-size: 12px; font-weight: 900;
+      background: rgba(213, 255, 133, 0.2); color: var(--lime); font-size: 14px; font-weight: 700;
     }
-    .move-icon { font-size: 24px; line-height: 1; flex: none; }
-    .move-info strong { display: block; font-size: 11px; color: var(--lime); letter-spacing: 0.08em; }
-    .move-info span { display: block; font-size: 10px; color: #bed2e4; margin-top: 2px; line-height: 1.4; }
-    .move.heavy { border-color: rgba(102, 246, 255, 0.35); background: rgba(102, 246, 255, 0.07); }
+    .move-icon { font-size: 25px; line-height: 1; flex: none; }
+    .move-info strong { display: block; font-size: 14px; font-weight: 700; color: var(--lime); letter-spacing: 0.14em; }
+    .move-info span { display: block; font-size: 12.5px; color: #c3d4e3; margin-top: 2px; line-height: 1.35; font-weight: 600; }
+    .move.heavy { border-color: rgba(102, 246, 255, 0.32); background: linear-gradient(90deg, rgba(102, 246, 255, 0.09), rgba(102, 246, 255, 0.02)); }
+    .move.heavy .move-num { background: rgba(102, 246, 255, 0.2); color: var(--cyan); }
     .move.heavy .move-info strong { color: var(--cyan); }
 
-    .startup-error { color: #ff8597 !important; font-size: 11.5px !important; margin-top: 8px; }
-    .gate-card .primary { width: 100%; min-height: 50px; margin-top: 10px; font-size: 11.5px; }
+    .startup-error { color: #ff8597 !important; font-size: 13px !important; margin-top: 8px !important; }
+    #start {
+      position: relative; width: 100%; min-height: 54px; margin-top: 12px; border-radius: 16px; cursor: pointer;
+      font: inherit; font-size: 15px; font-weight: 700; letter-spacing: 0.16em; color: #fff;
+      border: 1px solid rgba(255, 130, 150, 0.7);
+      background: linear-gradient(135deg, #e62a50, #9e1233);
+      box-shadow: 0 0 30px rgba(255, 51, 85, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+      transition: transform 0.12s ease, filter 0.15s ease;
+    }
+    #start:hover { filter: brightness(1.1); }
+    #start:active { transform: scale(0.98); }
+    #start:disabled { opacity: 0.6; cursor: wait; }
 
-    @media (max-width: 480px) {
-      .readout { top: max(68px, calc(env(safe-area-inset-top) + 54px)); }
-      .bottom { flex-direction: column; align-items: stretch; }
-      .hint { max-width: none; }
+    @media (max-width: 560px) {
+      .topbar { padding-left: 14px; padding-right: 14px; }
+      .brand-copy span { display: none; }
+      .readout { left: 14px; top: max(70px, calc(env(safe-area-inset-top) + 58px)); width: min(250px, calc(100vw - 28px)); }
+      .bottom { flex-direction: column; align-items: stretch; padding-left: 14px; padding-right: 14px; gap: 10px; }
+      .hint { max-width: none; padding: 11px 14px; }
+      .hint strong { font-size: 16px; }
+      .hint small { font-size: 12px; }
       .controls { justify-content: space-between; }
-      .controls button { flex: 1; }
+      .dock-btn { flex: 1; width: auto; height: 52px; }
+      .shoot-btn { right: 14px; bottom: max(168px, calc(env(safe-area-inset-bottom) + 162px)); width: 66px; height: 66px; }
+      .frame { inset: 6px; }
     }
   </style>
 </head>
 <body>
   <video id="camera-feed" autoplay muted playsinline></video>
   <div class="camera-shade"></div>
+  <div class="scanlines"></div>
   <canvas id="vision-overlay" aria-hidden="true"></canvas>
+  <div class="frame" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
 
   <main id="app">
     <header class="topbar">
       <div class="brand">
         <div class="brand-mark">🕷</div>
         <div class="brand-copy">
-          <strong>SPIDER-MAN AR</strong>
+          <strong>SPIDEY AR</strong>
           <span>REAL-TIME WEB SHOOTER</span>
         </div>
       </div>
@@ -254,26 +315,23 @@
     </header>
 
     <section class="readout">
-      <div class="readout-card">
-        <div class="eyebrow">SPIDER-SENSE / HANDS</div>
+      <div class="readout-card glass">
+        <div class="eyebrow">SPIDER-SENSE</div>
         <div class="readout-main">
           <strong id="hand-state">1 · IDLE</strong>
           <span id="hand-detail">SHOW HAND TO CAMERA</span>
         </div>
         <div class="meter"><i id="gesture-meter"></i></div>
         <div class="steps" aria-label="Hand movement steps">
-          <div class="step active"><b>🖐</b><small>1 IDLE</small></div>
-          <div class="step"><b>🤟</b><small>2 AIM</small></div>
-          <div class="step"><b>🕸️</b><small>3 SHOOT</small></div>
-          <div class="step"><b>✊</b><small>4 PULL</small></div>
+          <div class="step active"><b>🖐</b><small>IDLE</small></div>
+          <div class="step"><b>🤟</b><small>AIM</small></div>
+          <div class="step"><b>🕸️</b><small>SHOOT</small></div>
+          <div class="step"><b>✊</b><small>PULL</small></div>
         </div>
       </div>
-      <div class="readout-card">
-        <div class="eyebrow">REAL OBJECT RADAR</div>
-        <div class="readout-main">
-          <strong id="object-state">LOADING</strong>
-          <span id="object-count">ON DEVICE</span>
-        </div>
+      <div class="chips">
+        <div class="chip"><em id="object-state">LOADING</em></div>
+        <div class="chip score"><em id="object-count">0 COLLECTED</em></div>
       </div>
     </section>
 
@@ -286,32 +344,33 @@
     </button>
 
     <footer class="bottom">
-      <div class="hint" id="hint">
-        <strong>🖐 IDLE · 🤟 AIM · 🕸️ FLICK DOWN to shoot · ✊ FIST + PULL BACK to reel</strong>
-        <small>Nothing happens until you make the Spidey pose (index + pinky up). Crosshair snaps onto an object, flick your wrist down to shoot, then make a fist and pull back. Hold an open palm to let go.</small>
+      <div class="hint glass" id="hint">
+        <strong id="hint-title">🖐 SHOW YOUR HAND</strong>
+        <small id="hint-sub">Hold a hand up to the camera. Works at arm's length or further.</small>
       </div>
       <div class="controls">
-        <button id="cam-toggle">🔄 FLIP CAM</button>
-        <button id="recenter">🎯 RESCAN</button>
-        <button id="audio-toggle">🔊 AUDIO ON</button>
+        <button id="obj-toggle" class="dock-btn accent" title="Real / virtual objects"><i>🧊</i><span>REAL</span></button>
+        <button id="cam-toggle" class="dock-btn" title="Flip camera"><i>🔄</i><span>FLIP</span></button>
+        <button id="recenter" class="dock-btn" title="Rescan objects"><i>🎯</i><span>RESCAN</span></button>
+        <button id="audio-toggle" class="dock-btn" title="Sound"><i>🔊</i><span>ON</span></button>
       </div>
     </footer>
   </main>
 
   <section id="gate" class="gate">
     <div class="gate-card">
-      <div class="eyebrow">AUGMENTED REALITY // MOBILE FIELD TEST</div>
+      <div class="eyebrow">AUGMENTED REALITY // FIELD TEST</div>
       <h1>SUIT UP, SPIDEY.</h1>
-      <p>Four hand movements. Nothing fires by accident.</p>
+      <p>Four hand movements. Nothing fires by accident. No real objects around? Tap OBJECTS to add virtual ones.</p>
 
       <div class="move-list">
         <div class="move">
           <div class="move-num">1</div><div class="move-icon">🖐</div>
-          <div class="move-info"><strong>IDLE</strong><span>Any normal hand. The game does nothing — no aiming, no shooting.</span></div>
+          <div class="move-info"><strong>IDLE</strong><span>Any normal hand. Nothing happens — no aiming, no shooting.</span></div>
         </div>
         <div class="move">
           <div class="move-num">2</div><div class="move-icon">🤟</div>
-          <div class="move-info"><strong>AIM</strong><span>Index + pinky up, middle + ring curled. A crosshair with guide lines follows your fingertip and locks onto objects.</span></div>
+          <div class="move-info"><strong>AIM</strong><span>Index + pinky up, middle + ring folded. Point your index finger at an object — a glowing ray shows where you aim and the crosshair snaps on.</span></div>
         </div>
         <div class="move">
           <div class="move-num">3</div><div class="move-icon">🕸️</div>
@@ -319,15 +378,15 @@
         </div>
         <div class="move">
           <div class="move-num">4</div><div class="move-icon">✊</div>
-          <div class="move-info"><strong>PULL</strong><span>Make a fist and pull it back toward you to reel the object closer. Hold an open palm to let go.</span></div>
+          <div class="move-info"><strong>PULL</strong><span>Close your fist and pull back like reeling a rope — keep pumping to bring it in. Open your hand to let go.</span></div>
         </div>
         <div class="move heavy">
           <div class="move-num">+</div><div class="move-icon">🙌</div>
-          <div class="move-info"><strong>HEAVY OBJECTS</strong><span>Chairs, laptops, bags: aim and shoot with BOTH hands, then pull with BOTH fists.</span></div>
+          <div class="move-info"><strong>HEAVY OBJECTS</strong><span>Chairs, laptops, bags, big crates: keep BOTH hands in view, flick once to fire two webs, then pull with BOTH fists.</span></div>
         </div>
       </div>
 
-      <button id="start" class="primary">ACTIVATE CAMERA &amp; SUIT HUD</button>
+      <button id="start">ACTIVATE CAMERA &amp; SUIT HUD</button>
       <p id="startup-error" class="startup-error" aria-live="polite" hidden></p>
     </div>
   </section>
@@ -353,6 +412,8 @@
       toast: document.querySelector('#toast'),
       caughtBanner: document.querySelector('#caught'),
       steps: Array.from(document.querySelectorAll('.step')),
+      hintTitle: document.querySelector('#hint-title'),
+      hintSub: document.querySelector('#hint-sub'),
       gate,
       startButton,
     };
@@ -375,6 +436,12 @@
       }
     });
 
+    const objToggle = document.querySelector('#obj-toggle');
+    objToggle.addEventListener('click', () => {
+      const mode = game.cycleObjectMode();
+      objToggle.querySelector('span').textContent = mode;
+    });
+
     document.querySelector('#cam-toggle').addEventListener('click', async () => {
       await game.switchCamera();
     });
@@ -391,7 +458,8 @@
     const audioToggle = document.querySelector('#audio-toggle');
     audioToggle.addEventListener('click', () => {
       const isEnabled = sound.toggle();
-      audioToggle.textContent = isEnabled ? '🔊 AUDIO ON' : '🔇 AUDIO OFF';
+      audioToggle.querySelector('i').textContent = isEnabled ? '🔊' : '🔇';
+      audioToggle.querySelector('span').textContent = isEnabled ? 'ON' : 'OFF';
     });
 
     window.addEventListener('pagehide', () => {

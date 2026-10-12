@@ -7,6 +7,38 @@ const COLLECT_MS = 420;        // length of the "zip into the hand" collection a
 const HAND_LOST_MS = 650;      // how long a pulling hand may vanish from tracking before the web drops
 const IDLE_RELEASE_MS = 4000;  // latched but nobody gripping for this long -> let go
 
+// Wrap the cutout in silk: thin white strands criss-crossing the object, clipped to its exact
+// silhouette (source-atop), so it looks bound by the web instead of just tethered to it.
+function wrapInWeb(snapshot) {
+  if (!snapshot) return null;
+  const w = snapshot.width, h = snapshot.height;
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const g = c.getContext('2d');
+  g.drawImage(snapshot, 0, 0);
+  g.globalCompositeOperation = 'source-atop';
+  g.lineCap = 'round';
+  const lw = Math.max(1, Math.min(w, h) / 120);
+  for (let i = 0; i < 20; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const cx = w * (0.2 + Math.random() * 0.6), cy = h * (0.2 + Math.random() * 0.6);
+    const len = Math.max(w, h);
+    g.strokeStyle = `rgba(255,255,255,${0.35 + Math.random() * 0.4})`;
+    g.lineWidth = lw * (0.6 + Math.random() * 0.9);
+    g.beginPath();
+    g.moveTo(cx - Math.cos(a) * len, cy - Math.sin(a) * len);
+    g.quadraticCurveTo(cx + (Math.random() - 0.5) * w * 0.3, cy + (Math.random() - 0.5) * h * 0.3, cx + Math.cos(a) * len, cy + Math.sin(a) * len);
+    g.stroke();
+  }
+  const fog = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.6);
+  fog.addColorStop(0, 'rgba(255,255,255,0.22)');
+  fog.addColorStop(1, 'rgba(255,255,255,0.05)');
+  g.fillStyle = fog;
+  g.fillRect(0, 0, w, h);
+  return c;
+}
+
 export class ARObjectManager {
   constructor() {
     this.latchedTarget = null;
@@ -29,6 +61,7 @@ export class ARObjectManager {
       renderPos: { ...center },
       velocity: { x: 0, y: 0 },
       snapshotCanvas,
+      webbedCanvas: wrapInWeb(snapshotCanvas),
       tethers,
       pullProgress: 0,
       currentScale: 1.0,
@@ -45,6 +78,7 @@ export class ARObjectManager {
       waitingForHands: heavy,
       isPulling: false,
       lastPullTime: performance.now(),
+      trail: [],
     };
  
     return this.latchedTarget;
@@ -206,6 +240,14 @@ export class ARObjectManager {
     target.currentScale = 1.0 + target.pullProgress * 1.8;
     target.tiltAngle = Math.max(-0.25, Math.min(0.25, target.velocity.x * 0.015));
 
+    // Speed-blur trail: recorded only while actually moving fast, for a believable motion smear.
+    if (Math.abs(target.velocity.x) > 1.2) {
+      target.trail.push({ x: target.renderPos.x, y: target.renderPos.y, scale: target.currentScale, angle: target.tiltAngle });
+      if (target.trail.length > 5) target.trail.shift();
+    } else if (target.trail.length) {
+      target.trail.shift();
+    }
+
     const avgTension = tensionCount ? Math.min(1.0, totalTension / tensionCount) : 0;
     target.lastTension = target.isPulling ? avgTension : target.lastTension * 0.85;
 
@@ -259,17 +301,37 @@ export class ARObjectManager {
       ctx.restore();
     }
  
+    // Motion-blur ghost trail while the object is whipping toward the hand
+    if (snapshotCanvas && target.trail && target.trail.length > 1) {
+      const halfW0 = screenBox.w * 0.5;
+      const halfH0 = screenBox.h * 0.5;
+      const n = target.trail.length;
+      for (let i = 0; i < n - 1; i++) {
+        const g = target.trail[i];
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, Math.min(1, (target.alpha ?? 1))) * (0.08 + (i / n) * 0.1);
+        ctx.translate(g.x, g.y);
+        ctx.rotate(g.angle);
+        ctx.scale(g.scale, g.scale);
+        ctx.drawImage(snapshotCanvas, -halfW0, -halfH0, screenBox.w, screenBox.h);
+        ctx.restore();
+      }
+    }
+
     ctx.save();
     ctx.translate(renderPos.x, renderPos.y);
     ctx.rotate(tiltAngle);
     ctx.scale(currentScale, currentScale);
- 
+
     const halfW = screenBox.w * 0.5;
     const halfH = screenBox.h * 0.5;
- 
+
     if (snapshotCanvas) {
       ctx.save();
-      ctx.drawImage(snapshotCanvas, -halfW, -halfH, screenBox.w, screenBox.h);
+      // soft glow hugging the exact silhouette (shadow follows the cutout's alpha)
+      ctx.shadowColor = target.heavy ? 'rgba(255, 120, 150, 0.85)' : 'rgba(120, 235, 255, 0.85)';
+      ctx.shadowBlur = 8 + pullProgress * 18;
+      ctx.drawImage(target.webbedCanvas || snapshotCanvas, -halfW, -halfH, screenBox.w, screenBox.h);
       ctx.restore();
     }
  
