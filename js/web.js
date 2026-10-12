@@ -1,5 +1,5 @@
 // Hyper-Realistic Spider-Man Web Physics, Braided Silk Graphics, and Shooter FX
-
+ 
 export class WebSystem {
   constructor() {
     this.projectiles = [];
@@ -7,12 +7,12 @@ export class WebSystem {
     this.sparks = [];
     this.muzzleFlashes = [];
   }
-
+ 
   shootProjectile({ start, end, handId, onImpact }) {
     const dist = Math.hypot(end.x - start.x, end.y - start.y);
     const speed = Math.max(4200, dist * 9.0);
     const duration = Math.max(0.08, Math.min(0.15, dist / speed));
-
+ 
     const projectile = {
       id: `proj_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
       start: { ...start },
@@ -24,13 +24,13 @@ export class WebSystem {
       startTime: performance.now(),
       onImpact,
     };
-
+ 
     this.projectiles.push(projectile);
     this.muzzleFlashes.push({ x: start.x, y: start.y, born: performance.now(), life: 140 });
-
+ 
     return projectile;
   }
-
+ 
   addImpactSplat(point, radius = 32) {
     const spokesCount = 10;
     const angles = [];
@@ -47,7 +47,7 @@ export class WebSystem {
       born: performance.now(),
       life: 6000,
     });
-
+ 
     for (let i = 0; i < 16; i++) {
       const ang = Math.random() * Math.PI * 2;
       const spd = 30 + Math.random() * 110;
@@ -63,7 +63,7 @@ export class WebSystem {
       });
     }
   }
-
+ 
   spawnSparksAlongLine(start, end, count = 2) {
     const dx = end.x - start.x;
     const dy = end.y - start.y;
@@ -81,27 +81,27 @@ export class WebSystem {
       });
     }
   }
-
+ 
   update(now) {
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
       const p = this.projectiles[i];
       const elapsed = (now - p.startTime) / 1000;
       p.progress = Math.min(1.0, elapsed / p.duration);
-
+ 
       const t = p.progress;
       p.current.x = p.start.x + (p.end.x - p.start.x) * t;
       p.current.y = p.start.y + (p.end.y - p.start.y) * t;
-
+ 
       if (p.progress >= 1.0) {
         this.addImpactSplat(p.end);
         if (p.onImpact) p.onImpact();
         this.projectiles.splice(i, 1);
       }
     }
-
+ 
     this.impactSplats = this.impactSplats.filter((s) => now - s.born < s.life);
     this.muzzleFlashes = this.muzzleFlashes.filter((m) => now - m.born < m.life);
-
+ 
     const dt = 1 / 60;
     this.sparks = this.sparks.filter((s) => {
       s.x += s.vx * dt;
@@ -109,13 +109,13 @@ export class WebSystem {
       return now - s.born < s.life;
     });
   }
-
+ 
   drawWristShooter(ctx, muzzlePoint, isReady, now) {
     ctx.save();
     ctx.translate(muzzlePoint.x, muzzlePoint.y);
-
+ 
     const pulse = Math.sin(now * 0.012) * 0.5 + 0.5;
-
+ 
     ctx.strokeStyle = isReady ? 'rgba(255, 51, 85, 0.85)' : 'rgba(102, 246, 255, 0.65)';
     ctx.lineWidth = 2.0;
     ctx.shadowColor = isReady ? '#ff3355' : '#66f6ff';
@@ -123,14 +123,14 @@ export class WebSystem {
     ctx.beginPath();
     ctx.arc(0, 0, 11, 0, Math.PI * 2);
     ctx.stroke();
-
+ 
     ctx.fillStyle = isReady ? '#ff3355' : 'rgba(255, 51, 85, 0.5)';
     ctx.shadowColor = '#ff3355';
     ctx.shadowBlur = 10 + pulse * 6;
     ctx.beginPath();
     ctx.arc(0, 0, 4, 0, Math.PI * 2);
     ctx.fill();
-
+ 
     ctx.lineWidth = 1.4;
     ctx.strokeStyle = '#ffffff';
     for (let i = 0; i < 4; i++) {
@@ -140,10 +140,10 @@ export class WebSystem {
       ctx.lineTo(Math.cos(ang) * 15, Math.sin(ang) * 15);
       ctx.stroke();
     }
-
+ 
     ctx.restore();
   }
-
+ 
   drawProjectiles(ctx, now) {
     for (const p of this.projectiles) {
       const { start, current, end } = p;
@@ -152,10 +152,10 @@ export class WebSystem {
       const len = Math.hypot(dx, dy) || 1;
       const px = -dy / len;
       const py = dx / len;
-
+ 
       ctx.save();
       ctx.lineCap = 'round';
-
+ 
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 3.5;
       ctx.shadowColor = '#66f6ff';
@@ -169,12 +169,12 @@ export class WebSystem {
         ctx.lineTo(start.x + dx * t + px * wave, start.y + dy * t + py * wave);
       }
       ctx.stroke();
-
+ 
       ctx.strokeStyle = 'rgba(102, 246, 255, 0.7)';
       ctx.lineWidth = 6.5;
       ctx.shadowBlur = 24;
       ctx.stroke();
-
+ 
       for (let w = -1; w <= 1; w += 2) {
         ctx.beginPath();
         for (let s = 0; s <= segments; s++) {
@@ -189,18 +189,18 @@ export class WebSystem {
         ctx.lineWidth = 1.6;
         ctx.stroke();
       }
-
+ 
       ctx.fillStyle = '#ffffff';
       ctx.shadowColor = '#ffffff';
       ctx.shadowBlur = 20;
       ctx.beginPath();
       ctx.arc(current.x, current.y, 6.5, 0, Math.PI * 2);
       ctx.fill();
-
+ 
       ctx.restore();
     }
   }
-
+ 
   drawTether(ctx, start, end, tension = 0, now = performance.now()) {
     if (!start || !end || isNaN(start.x) || isNaN(start.y) || isNaN(end.x) || isNaN(end.y)) return;
     const dx = end.x - start.x;
@@ -208,53 +208,54 @@ export class WebSystem {
     const dist = Math.hypot(dx, dy) || 1;
     const px = -dy / dist;
     const py = dx / dist;
-
+ 
     const sag = (1 - tension) * Math.min(50, dist * 0.12);
     const vibrationAmp = tension > 0.04
       ? (Math.sin(now * 0.09) * 3.5 + Math.cos(now * 0.15) * 2.2) * tension
       : 0;
-
-    if (tension > 0.35 && Math.random() < 0.45) {
+ 
+    if (tension > 0.35 && this.sparks.length < 40 && Math.random() < 0.2) {
       this.spawnSparksAlongLine(start, end, 1);
     }
-
+ 
     ctx.save();
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-
+ 
+    // shadowBlur is the expensive part of canvas drawing: only the main strand glows, the others are plain lines
     const strands = [
-      { offset: 0, color: '#ffffff', width: 2.8 + tension * 1.2, blur: 16, glow: '#ffffff' },
-      { offset: 1, color: 'rgba(102, 246, 255, 0.9)', width: 1.8, blur: 12, glow: '#66f6ff' },
-      { offset: -1, color: 'rgba(213, 255, 133, 0.85)', width: 1.5, blur: 10, glow: '#d5ff85' },
-      { offset: 0.5, color: 'rgba(255, 255, 255, 0.7)', width: 1.2, blur: 8, glow: '#ffffff' },
+      { offset: 0, color: '#ffffff', width: 2.8 + tension * 1.2, blur: 10, glow: '#66f6ff' },
+      { offset: 1, color: 'rgba(102, 246, 255, 0.9)', width: 1.8, blur: 0, glow: '#66f6ff' },
+      { offset: -1, color: 'rgba(213, 255, 133, 0.85)', width: 1.5, blur: 0, glow: '#d5ff85' },
     ];
-
-    const segments = 28;
-
+ 
+    const segments = 22;
+ 
     for (const strand of strands) {
       ctx.beginPath();
       for (let i = 0; i <= segments; i++) {
         const t = i / segments;
         const envelope = Math.sin(t * Math.PI);
-
+ 
         const gravitySag = envelope * sag;
         const helix = Math.sin(t * 36 + now * 0.025 + strand.offset * 2.0) * 4.0 * envelope * (1 - tension * 0.6);
         const harmonic = Math.sin(t * 75 + now * 0.11) * vibrationAmp * envelope;
-
+ 
         const x = start.x + dx * t + px * (helix + harmonic);
         const y = start.y + dy * t + py * (helix + harmonic) + gravitySag;
-
+ 
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
-
+ 
       ctx.strokeStyle = strand.color;
       ctx.lineWidth = strand.width;
       ctx.shadowColor = strand.glow;
       ctx.shadowBlur = strand.blur;
       ctx.stroke();
     }
-
+    ctx.shadowBlur = 0;
+ 
     ctx.beginPath();
     ctx.arc(end.x, end.y, 7 + tension * 5, 0, Math.PI * 2);
     ctx.strokeStyle = '#ffffff';
@@ -262,34 +263,34 @@ export class WebSystem {
     ctx.shadowColor = '#66f6ff';
     ctx.shadowBlur = 16;
     ctx.stroke();
-
+ 
     ctx.beginPath();
     ctx.arc(start.x, start.y, 6, 0, Math.PI * 2);
     ctx.fillStyle = '#ffffff';
     ctx.fill();
-
+ 
     ctx.restore();
   }
-
+ 
   drawSplats(ctx, now) {
     for (const splat of this.impactSplats) {
       const age = now - splat.born;
       const alpha = Math.max(0, 1 - age / splat.life);
       if (alpha <= 0) continue;
-
+ 
       ctx.save();
       ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.95})`;
       ctx.shadowColor = '#66f6ff';
       ctx.shadowBlur = 10;
       ctx.lineWidth = 1.6;
-
+ 
       for (const ang of splat.angles) {
         ctx.beginPath();
         ctx.moveTo(splat.x, splat.y);
         ctx.lineTo(splat.x + Math.cos(ang) * splat.radius, splat.y + Math.sin(ang) * splat.radius);
         ctx.stroke();
       }
-
+ 
       for (let r = 1; r <= splat.rings; r++) {
         const ringRad = (r / splat.rings) * splat.radius;
         ctx.beginPath();
@@ -303,20 +304,20 @@ export class WebSystem {
         ctx.closePath();
         ctx.stroke();
       }
-
+ 
       ctx.restore();
     }
   }
-
+ 
   drawMuzzleFlashes(ctx, now) {
     for (const m of this.muzzleFlashes) {
       const age = now - m.born;
       const progress = age / m.life;
       if (progress >= 1) continue;
-
+ 
       const alpha = 1 - progress;
       const rad = 14 + progress * 24;
-
+ 
       ctx.save();
       ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
       ctx.shadowColor = '#66f6ff';
@@ -324,7 +325,7 @@ export class WebSystem {
       ctx.beginPath();
       ctx.arc(m.x, m.y, rad * 0.45, 0, Math.PI * 2);
       ctx.fill();
-
+ 
       ctx.strokeStyle = `rgba(102, 246, 255, ${alpha * 0.8})`;
       ctx.lineWidth = 3;
       ctx.beginPath();
@@ -333,7 +334,7 @@ export class WebSystem {
       ctx.restore();
     }
   }
-
+ 
   drawSparks(ctx, now) {
     if (this.sparks.length === 0) return;
     ctx.save();
@@ -342,14 +343,14 @@ export class WebSystem {
       const alpha = Math.max(0, 1 - age / s.life);
       ctx.fillStyle = s.color;
       ctx.shadowColor = s.color;
-      ctx.shadowBlur = 12;
+      ctx.shadowBlur = 4;
       ctx.beginPath();
       ctx.arc(s.x, s.y, s.size * alpha, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.restore();
   }
-
+ 
   render(ctx, now) {
     this.drawSplats(ctx, now);
     this.drawProjectiles(ctx, now);

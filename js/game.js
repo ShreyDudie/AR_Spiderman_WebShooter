@@ -6,14 +6,25 @@ import { VisionPipeline } from './vision.js';
 import { WebSystem } from './web.js';
 import { ARObjectManager } from './ar-objects.js';
 import { SpiderHUD } from './hud.js';
+import { PullFX } from './pull-fx.js';
  
-const HAND_HOLD_MS = 150;      // keep last known hands briefly when a frame has no new result
+const HAND_HOLD_MS = 220;      // keep last known hands briefly when a frame has no new result
 const SHOOT_COOLDOWN_MS = 750;
 const LOCK_GRACE_MS = 400;        // keep the aim lock this long after the fingertip drifts off the object (the flick itself moves it)
 const RELEASE_ARM_MS = 600;       // after latching, an open palm is ignored this long (the hand is still settling after the flick)
 const GIVE_UP_OPEN_MS = 450;      // never gripped + open palm held this long = player gave up -> release
 const HAND_ID_MEMORY_MS = 1500;   // how long a hand's identity (id 0 / 1) is remembered after it leaves tracking
 const HAND_ID_MATCH_DIST = 0.4;   // max normalised wrist travel between frames to count as the same hand
+const HAND_ID_RECENT_MS = 900;    // a lone hand that reappears far away is still the hand seen most recently within this time
+const LOCK_RADIUS_PX = 110;       // fingertip must be within this many px of an object's box to lock it
+const LOCK_SWITCH_MS = 140;       // a different object must stay the best candidate this long before the lock moves to it
+const LOCK_MEMORY_MS = 900;       // a flick may fire at the last locked object this long after the lock was lost
+const RELEASE_OPEN_MS = 200;      // a gripping hand must stay open this long before the web drops (single noisy frames are ignored)
+const PULL_TRAVEL_PALMS = 2.2;    // hand travel (in palm-lengths) for one full reel ... (about a third of the screen)
+const PULL_TRAVEL_MIN = 0.25;     // ... clamped to this fraction of the smaller screen side
+const PULL_TRAVEL_MAX = 0.60;     // ... and this fraction
+const SCAN_INTERVAL_MS = 200;     // object detection interval normally
+const SCAN_INTERVAL_AIM_MS = 700; // slower while aiming at a locked object: the detector blocks the main thread and starves hand tracking mid-flick
  
 export class SpideyGame {
   constructor(elements) {
@@ -27,6 +38,7 @@ export class SpideyGame {
     this.web = new WebSystem();
     this.arObjects = new ARObjectManager();
     this.hud = new SpiderHUD();
+    this.pullFx = new PullFX();
  
     this.running = false;
     this.rafId = null;
@@ -36,6 +48,8 @@ export class SpideyGame {
     this.lastHandsSeenAt = -Infinity;
     this.lockedTarget = null;
     this.lockSeenAt = 0;
+    this.lastLock = null;   // { target, t } the most recent lock, kept briefly so a flick that drags the finger off the object still fires
+    this.pendingLock = null; // { id, since } candidate waiting to replace the current lock
     this.collectedCount = 0;
     this.handTrack = new Map(); // stable handId -> { x, y, t } (last wrist position)
     this.activeProjectiles = new Set();
@@ -63,7 +77,7 @@ export class SpideyGame {
     this.running = true;
     this.updateStatus('SCANNING OBJECTS', 'ready');
     if (this.ui.gate) this.ui.gate.classList.add('hidden');
-    this.showToast('Spidey pose to AIM · flick wrist DOWN to SHOOT · FIST + pull to REEL');
+    this.showToast('Spidey pose to AIM · flick your wrist to SHOOT · FIST + pull to REEL');
  
     if (!this.listenersBound) {
       window.addEventListener('resize', () => this.vision.resizeCanvas());
@@ -111,10 +125,10 @@ export class SpideyGame {
     for (const det of detections) {
       const rect = this.vision.boxToScreen(det.bbox);
       if (!rect || rect.w <= 0 || rect.h <= 0) continue;
-
+ 
       // Never target the player's own hand
       if (this.vision.isHandDetection(rect, this.handStates)) continue;
-
+ 
       const center = { x: rect.x + rect.w * 0.5, y: rect.y + rect.h * 0.5 };
  
       const dx = Math.max(rect.x - ref.x, 0, ref.x - (rect.x + rect.w));
@@ -144,12 +158,12 @@ export class SpideyGame {
     }
     const wrists = [];
     for (let i = 0; i < n; i++) wrists.push({ x: rawHands.landmarks[i][0].x, y: rawHands.landmarks[i][0].y });
-
+ 
     const dist = (i, id) => {
       const p = this.handTrack.get(id);
       return p ? Math.hypot(wrists[i].x - p.x, wrists[i].y - p.y) : null;
     };
-
+ 
     const ids = [];
     if (n === 1) {
       let best = null;
@@ -158,7 +172,18 @@ export class SpideyGame {
         const d = dist(0, id);
         if (d != null && d < bestD) { bestD = d; best = id; }
       }
-      if (best == null) best = !this.handTrack.has(0) ? 0 : !this.handTrack.has(1) ? 1 : (dist(0, 0) <= dist(0, 1) ? 0 : 1);
+      if (best == null) {
+        // Too far from where either hand was last seen (fast pull, tracking dropout). Before: the hand was
+        // handed a NEW id, so the web's tether never found its hand again and the pull silently died.
+        // Now: it is the hand seen most recently, if that was a moment ago.
+        let recent = null;
+        let recentT = -Infinity;
+        for (const id of [0, 1]) {
+          const p = this.handTrack.get(id);
+          if (p && now - p.t < HAND_ID_RECENT_MS && p.t > recentT) { recentT = p.t; recent = id; }
+        }
+        best = recent != null ? recent : !this.handTrack.has(0) ? 0 : !this.handTrack.has(1) ? 1 : (dist(0, 0) <= dist(0, 1) ? 0 : 1);
+      }
       ids.push(best);
     } else if (n === 2) {
       const c = (i, id) => dist(i, id) ?? 0.5; // unknown history = neutral cost
@@ -170,16 +195,29 @@ export class SpideyGame {
     for (let i = 0; i < n; i++) this.handTrack.set(ids[i], { ...wrists[i], t: now });
     return ids;
   }
-
+ 
   // Turn a fresh MediaPipe result into analysed hand states
   analyzeHands(rawHands, now) {
     const states = [];
     const ids = this.assignHandIds(rawHands, now);
+    const aspect = this.video.videoWidth && this.video.videoHeight ? this.video.videoWidth / this.video.videoHeight : 1;
+ 
+    // One light web + exactly one hand in view: that hand IS the web's hand, whatever id tracking gave it.
+    const latchedNow = this.arObjects.latchedTarget;
+    if (latchedNow && latchedNow.tethers.size === 1 && ids.length === 1) {
+      const tetherId = latchedNow.tethers.keys().next().value;
+      if (ids[0] !== tetherId) {
+        this.handTrack.delete(ids[0]);
+        this.gestures.history.delete(ids[0]);
+        ids[0] = tetherId;
+        this.handTrack.set(tetherId, { x: rawHands.landmarks[0][0].x, y: rawHands.landmarks[0][0].y, t: now });
+      }
+    }
     for (let i = 0; i < ids.length; i++) {
       const landmarks = rawHands.landmarks[i];
       const worldLms = rawHands.worldLandmarks?.[i];
       const handedness = rawHands.handednesses?.[i]?.[0]?.categoryName || (i === 0 ? 'Right' : 'Left');
-      const analysis = this.gestures.analyzeHand(landmarks, worldLms, handedness, ids[i], now);
+      const analysis = this.gestures.analyzeHand(landmarks, worldLms, handedness, ids[i], now, aspect);
       if (analysis) states.push(analysis);
     }
     return states;
@@ -213,31 +251,29 @@ export class SpideyGame {
       const fist = hand && (hand.isFist || hand.fistHeld);
       if (fist) {
         const curMuzzle = this.vision.pointToScreen(hand.shooterMuzzle);
-        if (!tether.pullAnchor) {
-          tether.pullAnchor = {
-            hand: { ...hand },
-            muzzle: curMuzzle,
-            base: latched.pullProgress, // continue from wherever the object already is
-          };
-        }
-        const raw = this.gestures.calculatePull(
-          tether.pullAnchor.hand,
-          hand,
-          curMuzzle,
-          tether.pullAnchor.muzzle,
-          latched.originalCenter
+        // continue from wherever the object already is; the state only ever moves forward (ratchet)
+        if (!tether.pull) tether.pull = this.gestures.createPullState(latched.pullProgress);
+        const palmPx = this.palmLengthPx(hand);
+        const minDim = Math.min(this.vision.screenWidth, this.vision.screenHeight);
+        const travel = Math.max(
+          PULL_TRAVEL_MIN * minDim,
+          Math.min(PULL_TRAVEL_MAX * minDim, PULL_TRAVEL_PALMS * palmPx)
         );
-        const total = Math.min(1, tether.pullAnchor.base + raw.pullAmount);
-        pull = { pullAmount: total, tension: Math.min(1, Math.max(raw.tension, total * 0.5)), active: true };
+        this.gestures.updatePull(tether.pull, hand, curMuzzle, latched.originalCenter, palmPx, travel);
+        pull = {
+          pullAmount: tether.pull.progress,
+          tension: Math.min(1, Math.max(tether.pull.tension, tether.pull.progress * 0.5)),
+          active: true,
+        };
       } else {
-        tether.pullAnchor = null; // fist opened: re-anchor next time
+        tether.pull = null; // fist opened / hand missing: next grip restarts from the object's current progress
       }
  
       // Touch-drag pulling works with or without hands (counts as every strand)
       if (this.touchPullAmount > 0) {
         pull = {
           pullAmount: Math.max(pull.pullAmount, this.touchPullAmount),
-          tension: Math.max(pull.tension, this.touchPullAmount * 1.2),
+          tension: Math.min(1, Math.max(pull.tension, this.touchPullAmount * 1.2)),
           active: true,
           touch: true,
         };
@@ -245,6 +281,15 @@ export class SpideyGame {
       pullMap.set(id, pull);
     }
     return pullMap;
+  }
+ 
+  // Palm length (wrist -> middle knuckle) on screen, in px. Used to scale pull distances to the hand's size.
+  palmLengthPx(hand) {
+    const lm = hand.landmarks;
+    if (!lm || lm.length < 21) return 120;
+    const a = this.vision.pointToScreen(lm[0]);
+    const b = this.vision.pointToScreen(lm[9]);
+    return Math.max(40, Math.min(400, Math.hypot(a.x - b.x, a.y - b.y)));
   }
  
   // Decides whether the player has let go of the web.
@@ -256,20 +301,22 @@ export class SpideyGame {
     const age = now - latched.attachTime;
     let anyGripping = false;
     let giveUp = false;
-
+ 
     for (const [handId, tether] of latched.tethers.entries()) {
       const hand = this.handStates.find((h) => h.handId === handId);
       if (!hand) continue;
-
+ 
       if (hand.isFist || hand.fistHeld) {
         tether.engaged = true;
         tether.openSince = null;
         anyGripping = true;
         continue;
       }
-
+ 
       if (tether.engaged) {
-        if (hand.isHandReleased || hand.isOpenPalm) return true;
+        // A fast fist moving towards the camera blurs and can look "open" for a frame or two. Only a hand that
+        // stays open for a moment (or is unmistakably wide open) lets go.
+        if (hand.isClearlyOpen || (hand.isOpenPalm && hand.openForMs >= RELEASE_OPEN_MS)) return true;
       } else if (age > RELEASE_ARM_MS && hand.isOpenPalm) {
         if (tether.openSince == null) tether.openSince = now;
         if (now - tether.openSince > GIVE_UP_OPEN_MS) giveUp = true;
@@ -279,7 +326,7 @@ export class SpideyGame {
     }
     return giveUp && !anyGripping;
   }
-
+ 
   isAimHand(h) {
     return !!(h && (h.isSpideyPose || h.aimRecently));
   }
@@ -301,7 +348,7 @@ export class SpideyGame {
     this.vision.pullDataMap = this.buildPullMap();
  
     const latched = this.arObjects.latchedTarget;
-
+ 
     // Release the instant the pulling hand lets go (see checkGestureRelease)
     if (latched && this.checkGestureRelease(now, latched)) {
       this.releaseWeb('Hand released');
@@ -322,23 +369,43 @@ export class SpideyGame {
     // ---- Target locking (only while aiming) ----
     if (phase === 'AIM') {
       const lead = aimHands.find((h) => h.isSpideyPose) || aimHands[0];
-      // freeze the lock while the wrist is flicking so the shot can't slide to another object
-      if (lead.isSpideyPose && lead.flickProgress < 0.25 && lead.flickSpeed < 1.0) {
+      // Freeze the lock as soon as the wrist starts to flick (the flick drags the fingertip off the object,
+      // so the first frames of it must not re-aim the shot at something else or drop the lock).
+      const flicking = lead.flickProgress >= 0.15 || lead.isFlickDown || lead.flickSpeed >= 1.6;
+      if (lead.isSpideyPose && !flicking) {
         const aim = this.vision.pointToScreen(lead.aimTarget);
-        const target = this.getBestTarget(aim, 90);
+        const target = this.getBestTarget(aim, LOCK_RADIUS_PX);
+        const cur = this.lockedTarget;
         if (target) {
-          if (!this.lockedTarget || this.lockedTarget.detection.id !== target.detection.id) {
-            sound.playSpiderSense();
+          if (!cur || cur.detection.id === target.detection.id) {
+            if (!cur) sound.playSpiderSense();
+            this.lockedTarget = target;
+            this.pendingLock = null;
+          } else {
+            // another object is closer to the fingertip: switch only if it stays the best candidate for a moment
+            if (!this.pendingLock || this.pendingLock.id !== target.detection.id) {
+              this.pendingLock = { id: target.detection.id, since: now };
+            }
+            if (now - this.pendingLock.since >= LOCK_SWITCH_MS) {
+              sound.playSpiderSense();
+              this.lockedTarget = target;
+              this.pendingLock = null;
+            }
           }
-          this.lockedTarget = target;
           this.lockSeenAt = now;
-        } else if (this.lockedTarget && now - this.lockSeenAt > LOCK_GRACE_MS) {
-          this.lockedTarget = null; // crosshair has been off the object for a while
+        } else {
+          this.pendingLock = null;
+          if (cur && now - this.lockSeenAt > LOCK_GRACE_MS) {
+            this.lockedTarget = null; // crosshair has been off the object for a while
+          }
         }
       }
       this.refreshLockedTarget();
+      if (this.lockedTarget) this.lastLock = { target: this.lockedTarget, t: now };
     } else if (phase === 'IDLE' || latched) {
       this.lockedTarget = null;
+      this.pendingLock = null;
+      if (phase === 'IDLE') this.lastLock = null;
     }
  
     // ---- HUD text per movement ----
@@ -365,7 +432,7 @@ export class SpideyGame {
           '2 · AIM LOCKED',
           need2
             ? `${t.detection.class.toUpperCase()} IS HEAVY — AIM WITH BOTH HANDS`
-            : `${t.detection.class.toUpperCase()} · FLICK WRIST DOWN TO SHOOT`,
+            : `${t.detection.class.toUpperCase()} · FLICK WRIST TO SHOOT`,
           Math.round(20 + 80 * Math.max(...aimHands.map((h) => h.flickProgress || 0)))
         );
       } else {
@@ -396,13 +463,28 @@ export class SpideyGame {
     t.rect = rect;
     t.center = { x: rect.x + rect.w * 0.5, y: rect.y + rect.h * 0.5 };
   }
-
+ 
   // Movement 3: from the AIM pose, a quick wrist flick DOWN fires the web at the locked target
   tryGestureShoot(now, aimHands) {
-    const target = this.lockedTarget;
-    if (!target || this.arObjects.latchedTarget) return;
+    if (this.arObjects.latchedTarget) return;
     if (now - this.lastShootTime < SHOOT_COOLDOWN_MS) return;
-    if (!aimHands.some((h) => h.isFlickDown)) return;
+    const flickHand = aimHands.find((h) => h.isFlickDown);
+    if (!flickHand) return;
+ 
+    // The flick moves the fingertip, so the live lock can be gone by the time the flick is recognised.
+    // Fall back to the last lock, then to whatever the fingertip pointed at just BEFORE the flick started.
+    let target = this.lockedTarget;
+    if (!target && this.lastLock && now - this.lastLock.t < LOCK_MEMORY_MS) {
+      target = this.lastLock.target;
+      this.lockedTarget = target;
+      this.refreshLockedTarget();
+      target = this.lockedTarget;
+    }
+    if (!target && flickHand.aimPast) {
+      const past = this.getBestTarget(this.vision.pointToScreen(flickHand.aimPast), LOCK_RADIUS_PX);
+      if (past) { this.lockedTarget = past; target = past; }
+    }
+    if (!target) return;
  
     if (target.detection.heavy) {
       if (aimHands.length < 2) {
@@ -514,6 +596,7 @@ export class SpideyGame {
     this.shotToken++;
     this.activeProjectiles.clear();
     const released = this.arObjects.release();
+    this.pullFx.reset();
     this.touchPullAmount = 0;
     try {
       sound.stopTension();
@@ -533,7 +616,11 @@ export class SpideyGame {
     // The object detector runs on the main thread (~tens of ms per pass). While a web is in flight or
     // latched we don't need new detections, and running it caused the stutter while reeling in.
     const webBusy = !!this.arObjects.latchedTarget || this.activeProjectiles.size > 0;
-    const detections = webBusy ? this.vision.trackedDetections : this.vision.detectObjects(now);
+    const aimingLocked = this.phase === 'AIM' && !!this.lockedTarget;
+    const flicking = this.handStates.some((h) => h.flickProgress >= 0.1 || h.isFlickDown);
+    const detections = webBusy || flicking
+      ? this.vision.trackedDetections
+      : this.vision.detectObjects(now, aimingLocked ? SCAN_INTERVAL_AIM_MS : SCAN_INTERVAL_MS);
     if (this.ui.objectCount) {
       this.ui.objectCount.textContent = `${detections.length} DETECTED`;
     }
@@ -545,17 +632,17 @@ export class SpideyGame {
   updateReelingPhysics(now) {
     const update = this.arObjects.update(this.handStates, this.vision, now);
     if (!update) return;
-
+ 
     if (update.status === 'HAND_LOST') {
       this.releaseWeb('Hand lost — web released');
       return;
     }
-
+ 
     if (update.status === 'IDLE_TIMEOUT') {
       this.releaseWeb('Web released');
       return;
     }
-
+ 
     if (update.status === 'CAUGHT') {
       // Reported exactly once per object (it used to repeat every frame: sound spam + banner restarts)
       this.collectedCount++;
@@ -563,15 +650,16 @@ export class SpideyGame {
       sound.playCatch();
       this.showCaughtBanner(update.target.detection.class);
       this.hud.spawnBurst(update.target.renderPos);
+      this.pullFx.onCaught(update.target.renderPos);
       return;
     }
-
+ 
     if (update.status === 'COLLECTED') {
       const label = update.target.detection.class;
       this.releaseWeb(`${label} collected · total ${this.collectedCount}`);
       return;
     }
-
+ 
     if (update.status === 'REELING') {
       sound.updateTension(update.tension);
  
@@ -606,14 +694,18 @@ export class SpideyGame {
     if (latched) {
       this.arObjects.draw(this.ctx, now);
  
+      this.pullFx.draw(this.ctx, now, latched);
+ 
       for (const [handId, tether] of latched.tethers.entries()) {
         const hand = this.handStates.find((h) => h.handId === handId);
         const screenMuzzle = hand
           ? this.vision.pointToScreen(hand.shooterMuzzle)
-          : tether.startMuzzle;
+          : tether.curMuzzle || tether.startMuzzle;
         this.web.drawTether(this.ctx, screenMuzzle, latched.renderPos, latched.lastTension, now);
       }
     }
+ 
+    if (!latched) this.pullFx.idle(this.ctx, now);
  
     // 3. Draw wrist web-shooter & biometric skeleton
     this.hud.drawHandSkeleton(this.ctx, this.handStates, this.vision, now);
@@ -693,7 +785,7 @@ export class SpideyGame {
  
       if (this.arObjects.latchedTarget) {
         const pullDy = e.clientY - this.touchDrag.start.y;
-        this.touchPullAmount = Math.max(0, Math.min(1.0, pullDy / 130));
+        this.touchPullAmount = Math.max(0, Math.min(1.0, pullDy / 240));
       }
     });
  

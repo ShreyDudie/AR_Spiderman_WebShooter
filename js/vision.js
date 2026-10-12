@@ -10,23 +10,23 @@ const ALLOWED_SMALL_OBJECTS = new Set([
   'toothbrush', 'hair drier', 'fork', 'knife', 'spoon',
   'box', 'can', 'pen', 'pencil', 'umbrella'
 ]);
-
+ 
 // Need BOTH hands to latch and reel
 const HEAVY_OBJECTS = new Set([
   'chair', 'laptop', 'backpack', 'handbag', 'suitcase', 'potted plant', 'bench', 'tv', 'microwave', 'toaster'
 ]);
-
+ 
 const BLOCKED_CLASSES = new Set(['person', 'human', 'couch', 'bed', 'refrigerator']);
-
+ 
 function boxIoU(boxA, boxB) {
   const ax1 = boxA[0], ay1 = boxA[1], ax2 = boxA[0] + boxA[2], ay2 = boxA[1] + boxA[3];
   const bx1 = boxB[0], by1 = boxB[1], bx2 = boxB[0] + boxB[2], by2 = boxB[1] + boxB[3];
-
+ 
   const ix1 = Math.max(ax1, bx1);
   const iy1 = Math.max(ay1, by1);
   const ix2 = Math.min(ax2, bx2);
   const iy2 = Math.min(ay2, by2);
-
+ 
   if (ix2 <= ix1 || iy2 <= iy1) return 0;
   const interArea = (ix2 - ix1) * (iy2 - iy1);
   const areaA = Math.max(1, boxA[2] * boxA[3]);
@@ -58,6 +58,7 @@ export class VisionPipeline {
  
     this.lastVideoTime = -1;
     this.lastHandDetectTime = 0;
+    this.handCostMs = 12; // running average of one hand-tracking pass; sets how often we can afford to run it
     this.lastObjectDetectTime = 0;
     this.isObjectDetectBusy = false;
  
@@ -132,7 +133,7 @@ export class VisionPipeline {
         facingMode: { ideal: this.facingMode },
         width: { ideal: 1280 },
         height: { ideal: 720 },
-        frameRate: { ideal: 30, max: 30 },
+        frameRate: { ideal: 60, max: 60 }, // more frames = more samples of a 100-200 ms flick and less motion blur
       },
     };
  
@@ -221,12 +222,12 @@ export class VisionPipeline {
     const by = (rect.y + cropY) / scale;
     return [bx, by, rect.w / scale, rect.h / scale];
   }
-
+ 
   // Precisely verifies if a screen bounding box is actually the player's own hand
   // (without rejecting real objects that the player points at or aims towards)
   isHandDetection(screenRect, handStates = null) {
     if (!screenRect || screenRect.w <= 0 || screenRect.h <= 0) return false;
-
+ 
     // 1. Check against active analyzed hand states if available
     if (handStates && handStates.length > 0) {
       for (const hand of handStates) {
@@ -237,7 +238,7 @@ export class VisionPipeline {
       }
       return false;
     }
-
+ 
     // 2. Check against recent raw MediaPipe detections (within 350ms)
     if (!this.lastHandsResult || !this.lastHandsResult.landmarks || this.lastHandsResult.landmarks.length === 0) {
       return false;
@@ -245,7 +246,7 @@ export class VisionPipeline {
     if (performance.now() - (this.lastHandsTime || 0) > 350) {
       return false;
     }
-
+ 
     for (const lms of this.lastHandsResult.landmarks) {
       if (!lms || lms.length < 21) continue;
       const wrist = lms[0];
@@ -258,27 +259,27 @@ export class VisionPipeline {
         return true;
       }
     }
-
+ 
     return false;
   }
-
+ 
   _isBoxMatchingHand(screenRect, landmarks, normPalmCenter) {
     const rx1 = screenRect.x;
     const ry1 = screenRect.y;
     const rx2 = screenRect.x + screenRect.w;
     const ry2 = screenRect.y + screenRect.h;
-
+ 
     // Palm center must be inside the bounding box for a box to wrap the hand
     const spPalm = this.pointToScreen(normPalmCenter);
     if (spPalm.x < rx1 || spPalm.x > rx2 || spPalm.y < ry1 || spPalm.y > ry2) {
       return false;
     }
-
+ 
     // Core knuckle/wrist anchor points: wrist(0), thumbMCP(2), indexMCP(5), middleMCP(9), ringMCP(13), pinkyMCP(17)
     const coreIndices = [0, 2, 5, 9, 13, 17];
     let coreAnchorsInside = 0;
     let totalLandmarksInside = 0;
-
+ 
     for (let i = 0; i < landmarks.length; i++) {
       const sp = this.pointToScreen(landmarks[i]);
       if (sp.x >= rx1 && sp.x <= rx2 && sp.y >= ry1 && sp.y <= ry2) {
@@ -288,7 +289,7 @@ export class VisionPipeline {
         }
       }
     }
-
+ 
     // If palm center is inside AND core knuckles/wrist are inside (or 8+ landmarks inside),
     // then this detection box is the player's hand itself!
     return coreAnchorsInside >= 3 || totalLandmarksInside >= 8;
@@ -415,14 +416,17 @@ export class VisionPipeline {
     if (!this.handLandmarker || !this.video || this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
       return null;
     }
-    if (now - this.lastHandDetectTime < 28 || this.video.currentTime === this.lastVideoTime) {
+    const minGap = Math.max(14, Math.min(45, this.handCostMs * 1.25));
+    if (now - this.lastHandDetectTime < minGap || this.video.currentTime === this.lastVideoTime) {
       return null;
     }
     this.lastHandDetectTime = now;
     this.lastVideoTime = this.video.currentTime;
  
     try {
+      const t0 = performance.now();
       const result = this.handLandmarker.detectForVideo(this.video, now);
+      this.handCostMs = this.handCostMs * 0.85 + (performance.now() - t0) * 0.15;
       if (result && result.landmarks && result.landmarks.length > 0) {
         this.lastHandsResult = result;
         this.lastHandsTime = now;
@@ -433,22 +437,22 @@ export class VisionPipeline {
     }
   }
  
-  detectObjects(now) {
+  detectObjects(now, minInterval = 200) {
     if (!this.objectDetector || !this.video || this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
       return this.trackedDetections;
     }
-    // Update at ~5 fps (200ms) for responsive, low-latency tracking
-    if (this.isObjectDetectBusy || now - this.lastObjectDetectTime < 200) {
+    // ~5 fps by default; the game slows this down while the player is aiming (see SCAN_INTERVAL_AIM_MS)
+    if (this.isObjectDetectBusy || now - this.lastObjectDetectTime < minInterval) {
       return this.trackedDetections;
     }
-
+ 
     this.isObjectDetectBusy = true;
     this.lastObjectDetectTime = now;
-
+ 
     try {
       const result = this.objectDetector.detectForVideo(this.video, now);
       const screenTotalArea = this.screenWidth * this.screenHeight;
-
+ 
       const raw = result.detections
         .map((d) => {
           const cat = d.categories[0];
@@ -466,33 +470,33 @@ export class VisionPipeline {
           if (d.score < 0.22) return false;
           if (BLOCKED_CLASSES.has(d.class)) return false;
           if (!d.heavy && !ALLOWED_SMALL_OBJECTS.has(d.class)) return false;
-
+ 
           const rect = this.boxToScreen(d.bbox);
           if (rect.w < 20 || rect.h < 20) return false;
-
+ 
           const area = rect.w * rect.h;
           const maxArea = d.heavy ? 0.70 : 0.50;
           const maxH = d.heavy ? 0.90 : 0.80;
           if (area > screenTotalArea * maxArea || rect.h > this.screenHeight * maxH) return false;
-
+ 
           // Reject false positives that are the user's hand
           if (this.isHandDetection(rect)) return false;
-
+ 
           return true;
         });
-
+ 
       // Spatial tracking (IoU + distance matching) ensures rock-solid tracking stability
       const prevList = this.autoDetections;
       const used = new Set();
       const matched = [];
-
+ 
       for (const newDet of raw) {
         let bestPrev = null;
         let bestQuality = -Infinity;
-
+ 
         const nc = boxCenter(newDet.bbox);
         const newMaxDim = Math.max(newDet.bbox[2], newDet.bbox[3]);
-
+ 
         for (const prev of prevList) {
           if (used.has(prev.id)) continue;
           const iou = boxIoU(newDet.bbox, prev.bbox);
@@ -501,20 +505,20 @@ export class VisionPipeline {
           const prevMaxDim = Math.max(prev.bbox[2], prev.bbox[3]);
           const normDist = dist / Math.max(1, Math.max(newMaxDim, prevMaxDim));
           const sameClass = prev.class === newDet.class;
-
+ 
           let quality = -1;
           if (iou > 0.20) {
             quality = iou * 2.0 + (sameClass ? 1.0 : 0.3);
           } else if (normDist < 0.65) {
             quality = (1 - normDist) + (sameClass ? 0.8 : 0.2);
           }
-
+ 
           if (quality > 0.45 && quality > bestQuality) {
             bestQuality = quality;
             bestPrev = prev;
           }
         }
-
+ 
         if (bestPrev) {
           used.add(bestPrev.id);
           // Responsive lerp (0.65 new weight) tracks moving camera and moving objects tightly
@@ -539,7 +543,7 @@ export class VisionPipeline {
           });
         }
       }
-
+ 
       // Persist briefly-missed objects for up to 4 frames (~800ms) to prevent flicker
       for (const prev of prevList) {
         if (!used.has(prev.id) && (prev.missed || 0) < 4) {
@@ -553,7 +557,7 @@ export class VisionPipeline {
           }
         }
       }
-
+ 
       this.autoDetections = matched;
       this.trackedDetections = [...matched, ...this.manualTargets];
     } catch (err) {
@@ -561,7 +565,7 @@ export class VisionPipeline {
     } finally {
       this.isObjectDetectBusy = false;
     }
-
+ 
     return this.trackedDetections;
   }
  
