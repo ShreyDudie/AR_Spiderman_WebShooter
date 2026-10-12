@@ -10,7 +10,7 @@
 //   kept as a second path so nothing that used to work stops working.
  
 // FLICK_SENSITIVITY is the one knob to tune: 1.0 = strict, 1.6 = default, 2.0 = very sensitive.
-const FLICK_SENSITIVITY = 2.6;
+const FLICK_SENSITIVITY = 1.2;
  
 // --- Path A: palm rotation about the wrist (all values BEFORE dividing by FLICK_SENSITIVITY) ---
 const FLICK_ROT_DEG = 34;        // palm must swing at least this many degrees ...
