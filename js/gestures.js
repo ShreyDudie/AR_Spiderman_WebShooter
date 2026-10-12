@@ -1,283 +1,543 @@
-// Basic, lightweight visuals for reeling an object in.
-// No shadowBlur, no per-pixel work, at most ~20 simple strokes per frame, so it cannot slow hand tracking down.
-//   * progress ring around the object (fills as you reel, turns warm as tension rises)
-//   * a few speed streaks trailing behind the object, pointing back to where it started
-//   * 3 faint "ghost" copies of the object along its path
-//   * a pulsing anchor ring where the web is stuck
-//   * a shockwave ring when the object is caught
+// Spider-Man Biometric Hand Scanner & 21-Joint Pose Tracker
+// Validates finger joint angles, detects the wrist-flick shoot gesture, and measures the pull.
+//
+// WHY THE OLD FLICK WAS HARD TO DETECT
+//   The old detector only looked for the hand moving DOWN on the screen. A real web-shooter flick
+//   (see the reference photos) is a WRIST FLEXION: the palm swings about the wrist, often towards or
+//   away from the camera, so the hand barely moves up/down in the image at all.
+//   The new detector measures how fast the PALM ROTATES about the wrist (3D and in-plane), which is
+//   independent of where the arm is and of which way the flick goes. The old "downward drop" test is
+//   kept as a second path so nothing that used to work stops working.
  
-const MAX_STREAKS = 12;
-const GHOST_COUNT = 3;
-const GHOST_EVERY_MS = 55;
+// FLICK_SENSITIVITY is the one knob to tune: 1.0 = strict, 1.6 = default, 2.0 = very sensitive.
+const FLICK_SENSITIVITY = 1.6;
  
-export class PullFX {
+// --- Path A: palm rotation about the wrist (all values BEFORE dividing by FLICK_SENSITIVITY) ---
+const FLICK_ROT_DEG = 34;        // palm must swing at least this many degrees ...
+const FLICK_ROT_SPEED = 320;     // ... at at least this angular speed (degrees / second)
+const FLICK_POINT_FACTOR = 1.35; // finger-direction lever must move this much MORE (fingers also bend on their own)
+const FLICK_GLITCH_DEG = 75;     // a jump bigger than this between two frames is a tracking glitch, not a flick
+ 
+// --- Path B: downward translation (the original test) ---
+const FLICK_NEED = { wrist: 0.20, palm: 0.16, tip: 0.20 }; // downward travel in palm-lengths
+const FLICK_TIP_SPEED = 2.2;     // fingertip downward speed, palm-lengths/second (raised: slow wrist-aiming must not fire)
+const FLICK_MIN_SPEED = 1.8;     // slower drifts (aiming, lowering the hand) never count; palm-lengths/second
+ 
+const FLICK_TRAIL_MS = 360;      // how far back we look for the start of the movement
+const FLICK_WINDOW_MS = 350;     // how long a detected flick stays "active" (the game polls every frame)
+const FLICK_COOLDOWN_MS = 350;   // minimum time between two flicks of the same hand
+const TRACK_GAP_MS = 500;        // a longer tracking gap than this wipes the flick history
+ 
+// ---- Grip (fist) / release tuning ----
+// "Openness" = mean distance of the 4 fingertips from the palm centre, in palm-lengths.
+// A closed fist sits around 0.3-0.7, a flat open hand around 1.3-1.7.
+const FIST_ENTER = 0.72;       // openness below this counts as a fist even if the strict joint test fails
+const FIST_EXIT = 0.95;        // once gripping, openness must rise above this to stop counting as a fist (hysteresis)
+const RELEASE_OPEN = 1.0;      // fingers uncurled past this after a grip = the player let go
+const STRONG_OPEN = 1.1;       // clearly past the fist range: react on a single frame instead of two
+const CLEAR_OPEN = 1.25;       // "unmistakably open hand" (used for the fast release path)
+const FIST_GRACE_MS = 300;     // tracking-dropout grace for "still gripping" (fast fists blur and drop frames)
+const RELEASE_FLAG_MS = 350;   // how long isHandReleased stays raised after the grip opens
+const AIM_GRACE_MS = 160;      // the Spidey pose is kept alive this long after one bad frame (the flick bends the wrist)
+ 
+// ---- Pull tuning ----
+// Pulling is measured as hand SPEED away from the object, accumulated over time (a "ratchet").
+//   * Standing still / jitter adds nothing (speed must beat the dead zone).
+//   * Moving back toward the object never undoes progress, so you can pull, reset, pull again.
+//   * Progress per second is capped, so the reel is smooth and one jerk cannot snap it in.
+const PULL_DEADZONE_PALMS = 0.9;  // hand speed (palm-lengths / second) below this is jitter
+const PULL_DEADZONE_MIN_PX = 80;  // ... but never less than this many px / second
+const PULL_MAX_RATE = 1.1;        // maximum reel progress per second (full reel takes >= ~0.9 s)
+const PULL_SCALE_DEADZONE = 0.25; // hand growing (towards the camera) faster than 25 % / second counts as a pull
+const PULL_SCALE_FULL = 0.30;     // ... 30 % growth ~ one full reel
+const PULL_GAP_MS = 350;          // tracking gap that re-baselines the pull (no jump credit for the jump)
+const PULL_MAX_SPEED = 4000;      // px / second, ignore absurd tracking spikes
+ 
+function dist3D(p1, p2) {
+  return Math.hypot(p1.x - p2.x, p1.y - p2.y, (p1.z || 0) - (p2.z || 0));
+}
+ 
+function jointAngle(a, b, c) {
+  const abx = a.x - b.x, aby = a.y - b.y, abz = (a.z || 0) - (b.z || 0);
+  const cbx = c.x - b.x, cby = c.y - b.y, cbz = (c.z || 0) - (b.z || 0);
+  const dot = abx * cbx + aby * cby + abz * cbz;
+  const magAB = Math.hypot(abx, aby, abz);
+  const magCB = Math.hypot(cbx, cby, cbz);
+  if (magAB * magCB < 1e-7) return 0;
+  const cos = Math.max(-1, Math.min(1, dot / (magAB * magCB)));
+  return (Math.acos(cos) * 180) / Math.PI;
+}
+ 
+// unit vector a->b (null when the points coincide)
+function unitVec(a, b, sx = 1, sy = 1, sz = 1) {
+  const x = (b.x - a.x) * sx;
+  const y = (b.y - a.y) * sy;
+  const z = ((b.z || 0) - (a.z || 0)) * sz;
+  const m = Math.hypot(x, y, z);
+  if (m < 1e-6) return null;
+  return { x: x / m, y: y / m, z: z / m };
+}
+ 
+function unitVec2(a, b, sx = 1, sy = 1, minLen = 0.015) {
+  const x = (b.x - a.x) * sx;
+  const y = (b.y - a.y) * sy;
+  const m = Math.hypot(x, y);
+  if (m < minLen) return null; // hand pointing straight at the camera: in-plane direction is meaningless
+  return { x: x / m, y: y / m, z: 0 };
+}
+ 
+function angleBetween(u, v) {
+  if (!u || !v) return 0;
+  const dot = Math.max(-1, Math.min(1, u.x * v.x + u.y * v.y + u.z * v.z));
+  return (Math.acos(dot) * 180) / Math.PI;
+}
+ 
+export class GestureAnalyzer {
   constructor() {
-    this.streaks = [];
-    this.ghosts = [];
-    this.rings = [];
-    this.lastGhostAt = 0;
-    this.lastPos = null;
-    this.lastT = 0;
-    this.speed = 0;
-    this.sparks = [];
-    this.retract = null;
-    this.last = null;
-    this.burstDone = false;
+    this.history = new Map(); // handId -> smoothed states
   }
-
+ 
   reset() {
-    // cancelled / released mid-pull: the web snaps back to the hand (not when the object was caught)
-    if (this.last && !this.last.caught && this.last.progress > 0.02) {
-      this.retract = { from: this.last.pos, to: this.last.muzzle, born: performance.now(), life: 240 };
-    }
-    this.streaks.length = 0;
-    this.ghosts.length = 0;
-    this.sparks.length = 0;
-    this.lastPos = null;
-    this.last = null;
-    this.burstDone = false;
-    this.speed = 0;
-    // shockwave rings are left to finish on their own
+    this.history.clear();
   }
  
-  onCaught(pos) {
-    if (!pos) return;
-    const now = performance.now();
-    this.rings.push({ x: pos.x, y: pos.y, born: now, life: 420 });
-    for (let i = 0; i < 10; i++) this.addSpark(pos.x, pos.y, Math.random() * 6.283, 120 + Math.random() * 160, now);
-    this.last = null; // caught: nothing to retract
-  }
+  // aspect = video width / video height (needed so in-plane angles are not stretched)
+  analyzeHand(landmarks, worldLandmarks, handedness = 'Right', handId = 0, now = performance.now(), aspect = 1) {
+    if (!landmarks || landmarks.length < 21) return null;
  
-  // Called every frame when nothing is latched, so a finishing shockwave still plays after release.
-  idle(ctx, now) {
-    this.drawRetract(ctx, now);
-    this.drawSparks(ctx, now);
-    this.drawRings(ctx, now);
-  }
-
-  addSpark(x, y, ang, speed, now) {
-    if (this.sparks.length >= 24) this.sparks.shift();
-    this.sparks.push({ x, y, vx: Math.cos(ang) * speed, vy: Math.sin(ang) * speed, born: now, life: 300 + Math.random() * 200 });
-  }
-
-  // Tiny web-fibre flecks (plain 2-point lines, max 24)
-  drawSparks(ctx, now) {
-    if (!this.sparks.length) return;
-    ctx.save();
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 1.4;
-    ctx.lineCap = 'round';
-    for (let i = this.sparks.length - 1; i >= 0; i--) {
-      const s = this.sparks[i];
-      const t = (now - s.born) / s.life;
-      if (t >= 1) { this.sparks.splice(i, 1); continue; }
-      const e = 1 - Math.pow(1 - t, 2); // ease-out travel
-      const x = s.x + s.vx * e * 0.35;
-      const y = s.y + s.vy * e * 0.35;
-      ctx.globalAlpha = (1 - t) * 0.85;
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x - s.vx * 0.04 * (1 - t), y - s.vy * 0.04 * (1 - t));
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  // Released / cancelled: the strand whips back to the hand and fades.
-  drawRetract(ctx, now) {
-    const r = this.retract;
-    if (!r) return;
-    const t = (now - r.born) / r.life;
-    if (t >= 1) { this.retract = null; return; }
-    const e = t * t; // accelerates like a snapped rubber band
-    const hx = r.to.x, hy = r.to.y;
-    const x = r.from.x + (hx - r.from.x) * e;
-    const y = r.from.y + (hy - r.from.y) * e;
-    const dx = x - hx, dy = y - hy;
-    const d = Math.hypot(dx, dy) || 1;
-    const wob = Math.sin(t * 38) * 9 * (1 - t);
-    ctx.save();
-    ctx.lineCap = 'round';
-    ctx.globalAlpha = 1 - t;
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 2.4 * (1 - t) + 0.8;
-    ctx.beginPath();
-    ctx.moveTo(hx, hy);
-    ctx.quadraticCurveTo((hx + x) / 2 - (dy / d) * wob, (hy + y) / 2 + (dx / d) * wob, x, y);
-    ctx.stroke();
-    ctx.restore();
-  }
+    const lm = landmarks;
+    const wlm = worldLandmarks && worldLandmarks.length >= 21 ? worldLandmarks : null;
+    const asp = aspect > 0.2 && aspect < 5 ? aspect : 1;
  
-  draw(ctx, now, latched) {
-    if (!latched) return;
-    const pos = latched.renderPos;
-    const box = latched.screenBox;
-    const progress = Math.max(0, Math.min(1, latched.pullProgress || 0));
-    const tension = Math.max(0, Math.min(1, latched.lastTension || 0));
+    const wrist = lm[0];
+    const thumbTip = lm[4];
+    const indexMCP = lm[5], indexPIP = lm[6], indexDIP = lm[7], indexTip = lm[8];
+    const middleMCP = lm[9], middlePIP = lm[10], middleDIP = lm[11], middleTip = lm[12];
+    const ringMCP = lm[13], ringPIP = lm[14], ringDIP = lm[15], ringTip = lm[16];
+    const pinkyMCP = lm[17], pinkyPIP = lm[18], pinkyDIP = lm[19], pinkyTip = lm[20];
  
-    // --- how fast the object is moving on screen (px / s), smoothed ---
-    if (this.lastPos && now > this.lastT) {
-      const dt = Math.max(0.001, (now - this.lastT) / 1000);
-      const v = Math.hypot(pos.x - this.lastPos.x, pos.y - this.lastPos.y) / dt;
-      this.speed += (Math.min(v, 3000) - this.speed) * 0.25;
-    }
-    this.lastPos = { x: pos.x, y: pos.y };
-    this.lastT = now;
+    const palmCenter = {
+      x: (wrist.x + middleMCP.x) * 0.5,
+      y: (wrist.y + middleMCP.y) * 0.5,
+      z: ((wrist.z || 0) + (middleMCP.z || 0)) * 0.5,
+    };
+    const palmScale = Math.max(0.04, dist3D(wrist, middleMCP));
  
-    const baseR = Math.max(24, Math.max(box.w, box.h) * 0.5 * (latched.currentScale || 1) * 0.85);
-    const alpha = Math.max(0, Math.min(1, latched.alpha ?? 1));
+    // Joint angles for each finger
+    const indexAnglePIP = jointAngle(indexMCP, indexPIP, indexDIP);
+    const middleAnglePIP = jointAngle(middleMCP, middlePIP, middleDIP);
+    const ringAnglePIP = jointAngle(ringMCP, ringPIP, ringDIP);
+    const pinkyAnglePIP = jointAngle(pinkyMCP, pinkyPIP, pinkyDIP);
  
-    const muzzle = latched.lastValidMuzzle || pos;
-    this.last = { pos: { x: pos.x, y: pos.y }, muzzle: { x: muzzle.x, y: muzzle.y }, progress, caught: !!latched.isCaught };
-
-    ctx.save();
-    ctx.lineCap = 'round';
+    // Slightly more forgiving than before: the flick bends the wrist, which foreshortens the fingers
+    const isIndexExtended =
+      indexAnglePIP > 135 &&
+      dist3D(indexTip, wrist) > dist3D(indexPIP, wrist) * 1.1 &&
+      dist3D(indexTip, palmCenter) > palmScale * 1.05;
  
-    // anchor: a soft pulse where the web is stuck to the original spot
-    if (!latched.isCaught) {
-      const o = latched.originalCenter;
-      const pulse = (Math.sin(now * 0.008) + 1) * 0.5;
-      ctx.globalAlpha = 0.25 + 0.35 * tension;
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(o.x, o.y, 10 + pulse * (4 + tension * 8), 0, Math.PI * 2);
-      ctx.stroke();
+    const isPinkyExtended =
+      pinkyAnglePIP > 130 &&
+      dist3D(pinkyTip, wrist) > dist3D(pinkyPIP, wrist) * 1.08 &&
+      dist3D(pinkyTip, palmCenter) > palmScale * 0.95;
+ 
+    const isMiddleCurled =
+      middleAnglePIP < 130 ||
+      dist3D(middleTip, palmCenter) < palmScale * 0.82 ||
+      dist3D(middleTip, wrist) < dist3D(middlePIP, wrist) * 1.05;
+ 
+    const isRingCurled =
+      ringAnglePIP < 130 ||
+      dist3D(ringTip, palmCenter) < palmScale * 0.82 ||
+      dist3D(ringTip, wrist) < dist3D(ringPIP, wrist) * 1.05;
+ 
+    const isThumbExtended = dist3D(thumbTip, indexMCP) > palmScale * 0.65;
+ 
+    // Continuous finger-curl measure used for grip / release (much less jumpy than boolean joint tests)
+    const opennessAvg =
+      (dist3D(indexTip, palmCenter) +
+        dist3D(middleTip, palmCenter) +
+        dist3D(ringTip, palmCenter) +
+        dist3D(pinkyTip, palmCenter)) /
+      (4 * palmScale);
+ 
+    // Finger extension checks
+    const isMiddleExtended = middleAnglePIP > 135 && dist3D(middleTip, palmCenter) > palmScale * 1.0;
+    const isRingExtended = ringAnglePIP > 135 && dist3D(ringTip, palmCenter) > palmScale * 1.0;
+ 
+    const isSpideyPoseStrict = isIndexExtended && isPinkyExtended && isMiddleCurled && isRingCurled;
+    const isOpenPalmStrict = isIndexExtended && !isMiddleCurled && !isRingCurled && isPinkyExtended;
+    const isFistStrict = !isIndexExtended && isMiddleCurled && isRingCurled && !isPinkyExtended;
+ 
+    // Natural open / released hand: fingers uncurled from palm (not a fist)
+    const isOpenPalmNatural =
+      !isFistStrict &&
+      dist3D(middleTip, palmCenter) > palmScale * 0.88 &&
+      dist3D(ringTip, palmCenter) > palmScale * 0.88 &&
+      (isIndexExtended || isMiddleExtended || isRingExtended || isPinkyExtended);
+ 
+    const isOpenPalm = isOpenPalmStrict || isOpenPalmNatural;
+ 
+    // Temporal smoothing across consecutive frames
+    let hist = this.history.get(handId);
+    if (!hist) {
+      hist = {
+        spideyStreak: 0,
+        openStreak: 0,
+        fistStreak: 0,
+        clearOpenStreak: 0,
+        smoothWrist: { x: wrist.x, y: wrist.y, z: wrist.z || 0 },
+        smoothAim: { x: indexTip.x, y: indexTip.y },
+        smoothMuzzle: { x: wrist.x, y: wrist.y },
+        smoothPalmScale: palmScale,
+        prevMuzzle: { x: wrist.x, y: wrist.y },
+        prevTime: now,
+        velX: 0,
+        velY: 0,
+        trail: [],
+        aimTrail: [],
+        glitchStreak: 0,
+        flickUntil: 0,
+        flickAt: -Infinity,
+        lastFlickAt: -Infinity,
+        lastSpideyAt: -Infinity,
+        lastAimAt: -Infinity,
+        lastFistAt: -Infinity,
+        openSince: null,
+        fistOn: false,
+        fistMiss: 0,
+        releasedUntil: 0,
+      };
+      this.history.set(handId, hist);
     }
  
-    // anchor fibres: web strands pulling taut where the web is stuck, plus a one-off tear burst
-    if (!latched.isCaught) {
-      const o = latched.originalCenter;
-      if (progress > 0.04 && !this.burstDone) {
-        this.burstDone = true;
-        for (let i = 0; i < 8; i++) this.addSpark(o.x, o.y, Math.random() * 6.283, 90 + Math.random() * 130, now);
+    // ---- Fist with hysteresis ----
+    // Enter: strict joint test OR clearly curled fingers. Stay: until the fingers are clearly uncurled.
+    // Leave: needs 2 consecutive non-fist frames, or just 1 when the hand is unmistakably open.
+    const fistRaw =
+      isFistStrict ||
+      opennessAvg < FIST_ENTER ||
+      (hist.fistOn && opennessAvg < FIST_EXIT && !isOpenPalm);
+ 
+    hist.spideyStreak = isSpideyPoseStrict ? hist.spideyStreak + 1 : 0;
+    hist.openStreak = isOpenPalm ? hist.openStreak + 1 : 0;
+    hist.clearOpenStreak = opennessAvg >= CLEAR_OPEN && !fistRaw ? hist.clearOpenStreak + 1 : 0;
+    if (fistRaw) {
+      hist.fistStreak++;
+      hist.fistMiss = 0;
+    } else {
+      hist.fistStreak = 0;
+      hist.fistMiss++;
+    }
+ 
+    const missNeeded = opennessAvg >= STRONG_OPEN ? 1 : 2;
+    // 2 good frames are enough to confirm the aim pose (was 3), and it survives one bad frame
+    if (hist.spideyStreak >= 2) hist.lastSpideyAt = now;
+    const isSpideyConfirmed =
+      hist.spideyStreak >= 2 ||
+      (now - hist.lastSpideyAt < AIM_GRACE_MS && !(hist.fistOn || opennessAvg < FIST_ENTER));
+    const isOpenConfirmed = hist.openStreak >= 2;
+    const isFistConfirmed = hist.fistStreak >= 2 || (hist.fistOn && hist.fistMiss < missNeeded);
+    const justUngripped = hist.fistOn && !isFistConfirmed;
+    hist.fistOn = isFistConfirmed;
+ 
+    // Timers used by the 4-movement state machine
+    if (isSpideyConfirmed) hist.lastAimAt = now;
+    if (isFistConfirmed) hist.lastFistAt = now;
+    if (isOpenConfirmed) {
+      if (hist.openSince == null) hist.openSince = now;
+    } else {
+      hist.openSince = null;
+    }
+ 
+    // Letting go: the grip just ended AND the fingers are uncurling / open.
+    if (justUngripped && (isOpenPalm || opennessAvg >= RELEASE_OPEN)) {
+      hist.releasedUntil = now + RELEASE_FLAG_MS;
+    }
+    if (isFistConfirmed) hist.releasedUntil = 0;
+ 
+    const aimRecently = now - hist.lastAimAt < 600;   // aim pose held a moment ago (survives the flick)
+    const isHandReleased = now < hist.releasedUntil;
+    const fistHeld =
+      isFistConfirmed ||
+      (now - hist.lastFistAt < FIST_GRACE_MS && !isHandReleased && !isOpenPalm && opennessAvg < FIST_EXIT);
+    const openHeld = hist.openSince != null && (now - hist.openSince > 120 || isOpenConfirmed);
+    const openForMs = hist.openSince != null ? now - hist.openSince : 0;
+    const isClearlyOpen = hist.clearOpenStreak >= 2;
+    const pose = isSpideyConfirmed ? 'AIM' : isFistConfirmed ? 'FIST' : isOpenConfirmed ? 'OPEN' : 'IDLE';
+ 
+    hist.smoothWrist.x += (wrist.x - hist.smoothWrist.x) * 0.35;
+    hist.smoothWrist.y += (wrist.y - hist.smoothWrist.y) * 0.35;
+    hist.smoothWrist.z += ((wrist.z || 0) - hist.smoothWrist.z) * 0.35;
+ 
+    const rawMuzzleX = wrist.x * 0.75 + palmCenter.x * 0.25;
+    const rawMuzzleY = wrist.y * 0.75 + palmCenter.y * 0.25;
+    hist.smoothMuzzle.x += (rawMuzzleX - hist.smoothMuzzle.x) * 0.45;
+    hist.smoothMuzzle.y += (rawMuzzleY - hist.smoothMuzzle.y) * 0.45;
+ 
+    hist.smoothPalmScale += (palmScale - hist.smoothPalmScale) * 0.25;
+ 
+    hist.smoothAim.x += (indexTip.x - hist.smoothAim.x) * 0.4;
+    hist.smoothAim.y += (indexTip.y - hist.smoothAim.y) * 0.4;
+ 
+    // Where the fingertip was pointing BEFORE the flick started (the flick itself drags it off the object)
+    hist.aimTrail.push({ t: now, x: indexTip.x, y: indexTip.y });
+    while (hist.aimTrail.length > 1 && now - hist.aimTrail[0].t > 800) hist.aimTrail.shift();
+    let aimPast = null;
+    {
+      let sx = 0, sy = 0, n = 0;
+      for (const p of hist.aimTrail) {
+        const age = now - p.t;
+        if (age >= 150 && age <= 500) { sx += p.x; sy += p.y; n++; }
       }
-      const fl = 10 + 26 * Math.max(tension, progress);
-      const bx0 = o.x - pos.x, by0 = o.y - pos.y;
-      const base = Math.atan2(by0, bx0);
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 1.2;
-      ctx.globalAlpha = (0.3 + 0.4 * tension) * alpha;
-      for (let i = -2; i <= 2; i++) {
-        const a = base + i * 0.5;
-        const l = fl * (1 - Math.abs(i) * 0.18);
-        ctx.beginPath();
-        ctx.moveTo(o.x, o.y);
-        ctx.lineTo(o.x + Math.cos(a) * l, o.y + Math.sin(a) * l);
-        ctx.stroke();
+      if (n > 0) aimPast = { x: sx / n, y: sy / n, z: 0 };
+    }
+ 
+    // ---- Flick detection ----
+    const scale = hist.smoothPalmScale;
+    const dt = (now - hist.prevTime) / 1000;
+    if (dt > 0.005 && dt < 0.25) {
+      const vx = (rawMuzzleX - hist.prevMuzzle.x) / dt / scale;
+      const vy = (rawMuzzleY - hist.prevMuzzle.y) / dt / scale;
+      hist.velX = hist.velX * 0.4 + vx * 0.6;
+      hist.velY = hist.velY * 0.4 + vy * 0.6;
+    } else {
+      hist.velX = 0;
+      hist.velY = 0;
+    }
+    if (dt * 1000 >= TRACK_GAP_MS) hist.trail.length = 0; // long dropout: start over
+    hist.prevMuzzle.x = rawMuzzleX;
+    hist.prevMuzzle.y = rawMuzzleY;
+    hist.prevTime = now;
+ 
+    // 3D directions come from the metric world landmarks (independent of camera distance and tilt);
+    // if they are missing we fall back to the image landmarks in "width units".
+    const src = wlm || lm;
+    const sx3 = 1, sy3 = wlm ? 1 : 1 / asp, sz3 = 1;
+    const midTips = {
+      x: (src[8].x + src[20].x) * 0.5,
+      y: (src[8].y + src[20].y) * 0.5,
+      z: ((src[8].z || 0) + (src[20].z || 0)) * 0.5,
+    };
+    const midTips2 = { x: (indexTip.x + pinkyTip.x) * 0.5, y: (indexTip.y + pinkyTip.y) * 0.5 };
+ 
+    const cur = {
+      t: now,
+      palm3: unitVec(src[0], src[9], sx3, sy3, sz3),
+      point3: unitVec(src[0], midTips, sx3, sy3, sz3),
+      palm2: unitVec2(wrist, middleMCP, 1, 1 / asp),
+      point2: unitVec2(wrist, midTips2, 1, 1 / asp),
+      wrist: { x: rawMuzzleX, y: rawMuzzleY },
+      palm: { x: palmCenter.x, y: palmCenter.y },
+      tip: { x: indexTip.x, y: indexTip.y },
+    };
+ 
+    // Tracking glitch guard: one frame where the whole hand "teleports" by a huge angle is noise
+    let skipSample = false;
+    const prev = hist.trail.length ? hist.trail[hist.trail.length - 1] : null;
+    if (prev && now - prev.t < 70) {
+      const jump = Math.max(angleBetween(prev.palm3, cur.palm3), angleBetween(prev.palm2, cur.palm2));
+      if (jump > FLICK_GLITCH_DEG) {
+        hist.glitchStreak++;
+        if (hist.glitchStreak <= 2) skipSample = true;       // ignore up to 2 odd frames
+        else { hist.trail.length = 0; hist.glitchStreak = 0; } // it stuck: the hand really is there now
+      } else {
+        hist.glitchStreak = 0;
       }
-      // beads of light running along the strand towards the hand (faster as the reel progresses)
-      const mx = muzzle.x, my = muzzle.y;
-      if (Math.hypot(mx - pos.x, my - pos.y) > 40) {
-        ctx.fillStyle = '#9ffcff';
-        for (let i = 0; i < 4; i++) {
-          const u = ((now * (0.0009 + 0.0016 * Math.max(tension, progress)) + i / 4) % 1);
-          ctx.globalAlpha = Math.sin(u * Math.PI) * 0.85 * alpha;
-          ctx.beginPath();
-          ctx.arc(pos.x + (mx - pos.x) * u, pos.y + (my - pos.y) * u, 2.2, 0, 6.283);
-          ctx.fill();
+    }
+ 
+    let flickProgress = 0;
+    let flickKind = null;
+    if (!skipSample) {
+      hist.trail.push(cur);
+      while (hist.trail.length > 1 && now - hist.trail[0].t > FLICK_TRAIL_MS) hist.trail.shift();
+      if (hist.trail.length > 40) hist.trail.shift();
+ 
+      // ---- Path A: palm swinging about the wrist (any direction, towards / away from the camera too) ----
+      const needDeg = FLICK_ROT_DEG / FLICK_SENSITIVITY;
+      const needSpeed = FLICK_ROT_SPEED / FLICK_SENSITIVITY;
+      let rotProgress = 0;
+      for (const s of hist.trail) {
+        if (s === cur) continue;
+        const dtS = (now - s.t) / 1000;
+        if (dtS < 0.03) continue; // too short a baseline: jitter would look like speed
+        const test = (ang, factor) => {
+          if (ang <= 0) return;
+          const r = Math.min(ang / (needDeg * factor), ang / dtS / (needSpeed * factor));
+          if (r > rotProgress) rotProgress = r;
+        };
+        test(angleBetween(s.palm3, cur.palm3), 1);
+        test(angleBetween(s.palm2, cur.palm2), 1);
+        test(angleBetween(s.point3, cur.point3), FLICK_POINT_FACTOR);
+        test(angleBetween(s.point2, cur.point2), FLICK_POINT_FACTOR);
+      }
+      if (rotProgress > flickProgress) { flickProgress = rotProgress; flickKind = 'rotate'; }
+ 
+      // ---- Path B: small, quick downward movement of wrist, palm centre or fingertip ----
+      let dropProgress = 0;
+      for (const k of ['wrist', 'palm', 'tip']) {
+        let top = cur[k];
+        let topT = now;
+        for (const p of hist.trail) if (p[k].y <= top.y) { top = p[k]; topT = p.t; } // LAST moment it was highest
+        const drop = (cur[k].y - top.y) / scale;
+        const side = Math.abs(cur[k].x - top.x) / scale;
+        const dropSpeed = drop / Math.max(0.03, (now - topT) / 1000);
+        if (drop > side * 0.8 && dropSpeed >= FLICK_MIN_SPEED / FLICK_SENSITIVITY) {
+          dropProgress = Math.max(dropProgress, drop / (FLICK_NEED[k] / FLICK_SENSITIVITY));
         }
       }
-    }
-
-    // ghosts: faint copies of the cutout along its path (3 drawImage calls at most)
-    if (latched.snapshotCanvas && this.speed > 120 && now - this.lastGhostAt > GHOST_EVERY_MS) {
-      this.lastGhostAt = now;
-      this.ghosts.unshift({ x: pos.x, y: pos.y, s: latched.currentScale || 1, r: latched.tiltAngle || 0 });
-      if (this.ghosts.length > GHOST_COUNT) this.ghosts.pop();
-    } else if (this.speed <= 120 && this.ghosts.length) {
-      this.ghosts.pop(); // fade them out one by one when the object slows down
-    }
-    if (latched.snapshotCanvas) {
-      for (let i = 0; i < this.ghosts.length; i++) {
-        const g = this.ghosts[i];
-        ctx.save();
-        ctx.globalAlpha = alpha * (0.16 - i * 0.045);
-        ctx.translate(g.x, g.y);
-        ctx.rotate(g.r);
-        ctx.scale(g.s, g.s);
-        ctx.drawImage(latched.snapshotCanvas, -box.w * 0.5, -box.h * 0.5, box.w, box.h);
-        ctx.restore();
+      const first = hist.trail[0];
+      const spanS = (now - first.t) / 1000;
+      if (spanS > 0.04) {
+        const tipSpeed = (cur.tip.y - first.tip.y) / spanS / scale;
+        const tipSide = Math.abs(cur.tip.x - first.tip.x) / spanS / scale;
+        if (tipSpeed > tipSide * 0.8) {
+          dropProgress = Math.max(dropProgress, tipSpeed / (FLICK_TIP_SPEED / FLICK_SENSITIVITY));
+        }
+      }
+      if (dropProgress > flickProgress) { flickProgress = dropProgress; flickKind = 'drop'; }
+ 
+      if (flickProgress >= 1 && now - hist.lastFlickAt > FLICK_COOLDOWN_MS) {
+        hist.flickUntil = now + FLICK_WINDOW_MS;
+        hist.flickAt = now;
+        hist.lastFlickAt = now;
+        hist.flickKind = flickKind;
+        hist.trail.length = 0;   // one flick can never count twice ...
+        hist.trail.push(cur);    // ... but keep the current pose as the baseline for the next one
       }
     }
+    const isFlickDown = now < hist.flickUntil;
  
-    // streaks: short lines behind the object, pointing back toward where it started
-    const o = latched.originalCenter;
-    const bx = o.x - pos.x;
-    const by = o.y - pos.y;
-    const bl = Math.hypot(bx, by);
-    if (bl > 20 && this.speed > 160 && !latched.isCaught && this.streaks.length < MAX_STREAKS) {
-      const nx = bx / bl;
-      const ny = by / bl;
-      const count = this.speed > 700 ? 2 : 1;
-      for (let i = 0; i < count && this.streaks.length < MAX_STREAKS; i++) {
-        const side = (Math.random() - 0.5) * 2 * baseR * 0.9;
-        this.streaks.push({
-          x: pos.x - ny * side,
-          y: pos.y + nx * side,
-          dx: nx,
-          dy: ny,
-          len: 18 + Math.random() * 26 + Math.min(40, this.speed * 0.02),
-          born: now,
-          life: 260,
-        });
-      }
-    }
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 1.6;
-    for (let i = this.streaks.length - 1; i >= 0; i--) {
-      const s = this.streaks[i];
-      const age = (now - s.born) / s.life;
-      if (age >= 1) { this.streaks.splice(i, 1); continue; }
-      const drift = age * 22;
-      const x0 = s.x + s.dx * drift;
-      const y0 = s.y + s.dy * drift;
-      ctx.globalAlpha = alpha * (1 - age) * 0.7;
-      ctx.beginPath();
-      ctx.moveTo(x0, y0);
-      ctx.lineTo(x0 + s.dx * s.len, y0 + s.dy * s.len);
-      ctx.stroke();
-    }
- 
-    // progress ring: faint full circle + bright arc that fills with the reel
-    if (progress > 0.01 && !latched.isCaught) {
-      const r = baseR + 12;
-      const hue = Math.round(185 - 185 * Math.max(progress * 0.6, tension)); // cyan -> red as it tightens
-      ctx.globalAlpha = 0.28;
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
-      ctx.stroke();
- 
-      ctx.globalAlpha = 0.95;
-      ctx.strokeStyle = `hsl(${hue}, 100%, 62%)`;
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, progress / 0.85));
-      ctx.stroke();
-    }
- 
-    ctx.restore();
-    this.drawRetract(ctx, now);
-    this.drawSparks(ctx, now);
-    this.drawRings(ctx, now);
+    return {
+      handId,
+      handedness,
+      landmarks,
+      worldLandmarks: worldLandmarks || landmarks,
+      sampleTime: now, // timestamp of the tracking frame this state came from (pull maths ignores repeats)
+      wrist: { ...hist.smoothWrist },
+      shooterMuzzle: { x: hist.smoothMuzzle.x, y: hist.smoothMuzzle.y, z: hist.smoothWrist.z },
+      aimTarget: { x: hist.smoothAim.x, y: hist.smoothAim.y, z: 0 },
+      aimPast,
+      palmCenter,
+      palmScale: hist.smoothPalmScale,
+      isSpideyPose: isSpideyConfirmed,
+      isOpenPalm: isOpenConfirmed,
+      isFist: isFistConfirmed,
+      isFlickDown,
+      flickAt: hist.flickAt,
+      flickKind: isFlickDown ? hist.flickKind : null,
+      flickProgress: isFlickDown ? 1 : Math.min(1, flickProgress),
+      flickSpeed: hist.velY,
+      pose,
+      aimRecently,
+      fistHeld,
+      openHeld,
+      openForMs,
+      isClearlyOpen,
+      isHandReleased,
+      opennessAvg,
+      jointStates: {
+        indexExtended: isIndexExtended,
+        pinkyExtended: isPinkyExtended,
+        middleCurled: isMiddleCurled,
+        ringCurled: isRingCurled,
+        thumbExtended: isThumbExtended,
+      },
+      angles: {
+        index: indexAnglePIP,
+        middle: middleAnglePIP,
+        ring: ringAnglePIP,
+        pinky: pinkyAnglePIP,
+      },
+    };
   }
  
-  drawRings(ctx, now) {
-    if (!this.rings.length) return;
-    ctx.save();
-    ctx.strokeStyle = '#ffffff';
-    for (let i = this.rings.length - 1; i >= 0; i--) {
-      const r = this.rings[i];
-      const t = (now - r.born) / r.life;
-      if (t >= 1) { this.rings.splice(i, 1); continue; }
-      ctx.globalAlpha = (1 - t) * 0.9;
-      ctx.lineWidth = 4 * (1 - t) + 1;
-      ctx.beginPath();
-      ctx.arc(r.x, r.y, 20 + t * 90, 0, Math.PI * 2);
-      ctx.stroke();
+  // ------------------------------------------------------------------------------------------
+  // PULL (movement 4)
+  // One pull state per web strand. The state only ever ADVANCES (ratchet): the web is reeled in by
+  // hand speed directed away from the object (or the hand growing towards the camera).
+  // ------------------------------------------------------------------------------------------
+  createPullState(startProgress = 0) {
+    return {
+      progress: Math.max(0, Math.min(1, startProgress)),
+      lastSampleT: null,
+      lastT: null,
+      lastX: 0,
+      lastY: 0,
+      lastScale: 0,
+      vx: 0,
+      vy: 0,
+      scaleRate: 0,
+      tension: 0,
+      along: 0,
+    };
+  }
+ 
+  // muzzle / objectCenter are SCREEN points, palmPx = palm length on screen, travelPx = hand travel for a full reel.
+  // Returns the (mutated) state: state.progress (0..1) and state.tension (0..1).
+  updatePull(st, hand, muzzle, objectCenter, palmPx, travelPx) {
+    if (!st || !hand) return st;
+    const t = hand.sampleTime ?? performance.now();
+    if (t === st.lastSampleT) return st; // same tracking frame as last time: nothing new to measure
+    st.lastSampleT = t;
+ 
+    const palm = Math.max(20, palmPx || 100);
+    const travel = Math.max(80, travelPx || 300);
+ 
+    if (st.lastT == null || t - st.lastT > PULL_GAP_MS) {
+      // first sample, or the hand was lost for a moment: re-baseline instead of crediting the jump
+      st.lastT = t;
+      st.lastX = muzzle.x;
+      st.lastY = muzzle.y;
+      st.lastScale = hand.palmScale;
+      st.vx = 0;
+      st.vy = 0;
+      st.scaleRate = 0;
+      st.along = 0;
+      st.tension *= 0.8;
+      return st;
     }
-    ctx.restore();
+ 
+    const dt = (t - st.lastT) / 1000;
+    if (dt < 0.006) return st;
+ 
+    // smoothed velocity (px / s), spikes clipped
+    let rvx = (muzzle.x - st.lastX) / dt;
+    let rvy = (muzzle.y - st.lastY) / dt;
+    const rs = Math.hypot(rvx, rvy);
+    if (rs > PULL_MAX_SPEED) { rvx *= PULL_MAX_SPEED / rs; rvy *= PULL_MAX_SPEED / rs; }
+    st.vx = st.vx * 0.5 + rvx * 0.5;
+    st.vy = st.vy * 0.5 + rvy * 0.5;
+ 
+    // direction of a pull = from the object towards the hand (straight down if they overlap)
+    let dx = muzzle.x - objectCenter.x;
+    let dy = muzzle.y - objectCenter.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 60) { dx = 0; dy = 1; } else { dx /= len; dy /= len; }
+ 
+    const along = Math.max(st.vx * dx + st.vy * dy, st.vy * 0.6); // away from the object, or simply down
+    st.along = along;
+ 
+    const deadzone = Math.max(PULL_DEADZONE_MIN_PX, PULL_DEADZONE_PALMS * palm);
+    let gain = (Math.max(0, along - deadzone) * dt) / travel;
+ 
+    // hand growing in the image = hand coming towards the camera = pulling the rope in
+    const growth = (hand.palmScale - st.lastScale) / Math.max(0.01, st.lastScale) / dt;
+    st.scaleRate = st.scaleRate * 0.5 + growth * 0.5;
+    if (st.scaleRate > PULL_SCALE_DEADZONE) {
+      gain += ((st.scaleRate - PULL_SCALE_DEADZONE) * dt) / PULL_SCALE_FULL;
+    }
+ 
+    gain = Math.min(gain, PULL_MAX_RATE * dt);
+    st.progress = Math.min(1, st.progress + gain);
+ 
+    const effort = Math.min(1, along / (4 * palm));
+    const tens = 0.2 + 0.45 * st.progress + 0.35 * effort;
+    st.tension += (Math.min(1, tens) - st.tension) * 0.3;
+ 
+    st.lastT = t;
+    st.lastX = muzzle.x;
+    st.lastY = muzzle.y;
+    st.lastScale = hand.palmScale;
+    return st;
   }
 }
